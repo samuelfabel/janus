@@ -55,3 +55,90 @@ impl StorageEngine for MemoryStorageEngine {
         self.storage.remove(key).is_some()
     }
 }
+
+mod tests {
+    use crate::storage::engine::StorageEngine;
+
+    const KEY: &[u8] = b"key";
+    const VALUE: &[u8] = b"value1";
+    const VALUE2: &[u8] = b"value2";
+
+    #[test]
+    fn delete_existing_key_remove_it_and_return_true() {
+        // Assert
+        let mut target = super::MemoryStorageEngine::new();
+
+        // Act
+        let result = target.delete(KEY);
+
+        // Assert
+        assert!(!result);
+    }
+
+    #[test]
+    fn delete_non_existing_key_return_false() {
+        // Assert
+        let mut target = super::MemoryStorageEngine::new();
+
+        // Act
+        let result = target.delete(KEY);
+
+        // Assert
+        assert!(!result);
+    }
+
+    #[test]
+    fn execute_get_non_existing_key_return_none() {
+        // Assert
+        let target = super::MemoryStorageEngine::new();
+
+        // Act
+        let result = target.get(KEY);
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn execute_get_existing_key_return_value() {
+        // Assert
+        let mut target = super::MemoryStorageEngine::new();
+        target.storage.insert(KEY.to_vec(), VALUE.to_vec());
+
+        // Act
+        let result = target.get(KEY);
+
+        // Assert
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), VALUE);
+    }
+
+    #[test]
+    fn execute_set_key_non_existing_key_store_it_and_return_empty() {
+        // Assert
+        let mut target = super::MemoryStorageEngine::new();
+
+        // Act
+        target.set(KEY, VALUE);
+
+        let stored_value = target.get(KEY).unwrap();
+
+        // Assert
+        assert_eq!(stored_value, VALUE);
+    }
+
+    #[test]
+    fn execute_set_key_store_it_and_return_empty() {
+        // Assert
+        let mut target = super::MemoryStorageEngine::new();
+        target.storage.insert(KEY.to_vec(), VALUE.to_vec());
+
+        // Act
+        target.set(KEY, VALUE2);
+
+        let stored_value = target.get(KEY).unwrap();
+
+        // Assert
+        assert_eq!(stored_value, VALUE2);
+    }
+}

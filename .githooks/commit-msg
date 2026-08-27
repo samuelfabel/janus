@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Reject commit messages that still contain tool co-author / attribution trailers.
+set -euo pipefail
+
+msg_file="${1:-}"
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  echo "commit-msg: missing message file" >&2
+  exit 1
+fi
+
+if grep -Eiq \
+  -e '^[[:space:]]*Co-authored-by:[[:space:]].*Cursor' \
+  -e 'cursoragent@cursor\.com' \
+  -e 'noreply@cursor\.' \
+  -e '^[[:space:]]*Made-with:[[:space:]]*Cursor' \
+  -e '^[[:space:]]*Generated-by:[[:space:]]*Cursor' \
+  -e '^[[:space:]]*Assisted-by:[[:space:]]*Cursor' \
+  -e '^[[:space:]]*Co-authored-by:[[:space:]].*copilot' \
+  -e '^[[:space:]]*Generated-by:' \
+  -e '^[[:space:]]*Made-with:[[:space:]]*ChatGPT' \
+  "$msg_file"
+then
+  echo "commit rejected: message contains a tool co-author or generator trailer." >&2
+  echo "Remove those trailers and commit again." >&2
+  exit 1
+fi
+
+exit 0

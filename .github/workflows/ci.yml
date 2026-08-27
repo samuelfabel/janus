@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo test
+        run: cargo test
+      - name: Cargo check
+        run: cargo check
+
+  no-tool-coauthor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject tool co-author trailers
+        run: |
+          chmod +x scripts/check-no-tool-coauthor.sh
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=50 || true
+            ./scripts/check-no-tool-coauthor.sh "origin/${{ github.base_ref }}...HEAD"
+          else
+            ./scripts/check-no-tool-coauthor.sh HEAD~20..HEAD || ./scripts/check-no-tool-coauthor.sh HEAD
+          fi

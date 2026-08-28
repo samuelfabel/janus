@@ -1,6 +1,10 @@
 //! This module defines the trait for the storage engine
 
+#[cfg(test)]
+use mockall::automock;
+
 /// Define the trait for the storage engine
+#[cfg_attr(test, automock)]
 pub trait StorageEngine {
     /// Define the methods for the storage engine
     ///
@@ -9,7 +13,7 @@ pub trait StorageEngine {
     ///
     /// # Returns
     /// * `Option<&[u8]>` - An optional slice of bytes representing the value
-    fn get(&self, key: &[u8]) -> Option<&[u8]>;
+    fn get<'a>(&'a self, key: &[u8]) -> Option<&'a [u8]>;
 
     /// Stores the value associated with the given key.
     ///

@@ -11,5 +11,3 @@ categories = ["database-implementations", "network-programming"]
 
 [dependencies]
 
-[dev-dependencies]
-mockall = "0.15.0"

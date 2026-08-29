@@ -21,7 +21,7 @@ This project does **not**:
 
 ## Status
 
-Early development. Kernel and in-memory storage have unit tests; TCP + RESP scaffolding is in progress.
+Early development. TCP listen on `0.0.0.0:6380` with RESP `SET` / `GET` / `DEL` over an in-memory store.
 
 ## Install / build
 

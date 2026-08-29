@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- TCP listener with `--bind` / `JANUS_BIND` (default `0.0.0.0:6380`)
+- RESP codec path for SET / GET / DEL wired through kernel + memory storage
 - Open-source community health files (Contributing, Code of Conduct, Security, Support)
 - Conventional Commits / branch guidelines
 - GitHub Actions CI (`cargo test`)

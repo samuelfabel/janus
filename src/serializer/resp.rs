@@ -16,8 +16,8 @@ impl Serializer for RespSerializer {
         match response {
             Response::Empty => b"+OK\r\n".to_vec(),
             Response::Value(None) => b"$-1\r\n".to_vec(),
-            Response::Boolean(true) => b":1\r\n".to_vec(),
-            Response::Boolean(false) => b":0\r\n".to_vec(),
+            Response::Deleted(true) => b":1\r\n".to_vec(),
+            Response::Deleted(false) => b":0\r\n".to_vec(),
             Response::Value(Some(payload)) => {
                 let digits = count_digits(payload.len());
                 let mut buffer = Vec::with_capacity(1 + digits + 2 + payload.len() + 2);
@@ -223,16 +223,16 @@ mod tests {
     }
 
     #[test]
-    fn encode_empty_and_boolean() {
+    fn encode_empty_and_deleted() {
         let serializer = RespSerializer;
         let cmd = Command::Set {
             key: b"k",
             value: b"v",
         };
         assert_eq!(serializer.encode(&cmd, &Response::Empty), b"+OK\r\n");
-        assert_eq!(serializer.encode(&cmd, &Response::Boolean(true)), b":1\r\n");
+        assert_eq!(serializer.encode(&cmd, &Response::Deleted(true)), b":1\r\n");
         assert_eq!(
-            serializer.encode(&cmd, &Response::Boolean(false)),
+            serializer.encode(&cmd, &Response::Deleted(false)),
             b":0\r\n"
         );
     }

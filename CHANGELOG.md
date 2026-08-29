@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests
 - Cargo edition set to `2021` for stable toolchain compatibility
 - README expanded with build, docs, and contribution links

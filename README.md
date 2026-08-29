@@ -59,6 +59,16 @@ Compose:
 docker compose up --build
 ```
 
+## Website
+
+Public landing page (English): source in [`site/`](site/), published via GitHub Pages.
+
+```bash
+cd site
+npm install
+npm run build
+```
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)

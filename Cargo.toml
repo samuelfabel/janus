@@ -1,9 +1,13 @@
 [package]
 name = "janus"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+license = "MIT"
+description = "A modular data kernel written in Rust"
+repository = "https://github.com/samuelfabel/janus"
+readme = "README.md"
+keywords = ["cache", "storage", "kernel", "resp"]
+categories = ["database-implementations", "network-programming"]
 
 [dependencies]
 
-[dev-dependencies]
-mockall = "0.15.0"

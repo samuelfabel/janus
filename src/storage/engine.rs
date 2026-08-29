@@ -1,11 +1,7 @@
 //! This module defines the trait for the storage engine
 
-#[cfg(test)]
-use mockall::automock;
-
-/// Define the trait for the storage engine
-#[cfg_attr(test, automock)]
-pub trait StorageEngine {
+/// Define the trait for the storage engine.
+pub trait StorageEngine: Send {
     /// Define the methods for the storage engine
     ///
     /// # Arguments

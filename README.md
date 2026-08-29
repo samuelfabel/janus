@@ -1,21 +1,69 @@
 # Janus
 
-Janus is a modular data kernel written in Rust.
+![CI](https://img.shields.io/github/actions/workflow/status/samuelfabel/janus/ci.yml?branch=main&label=CI)
+![License](https://img.shields.io/github/license/samuelfabel/janus)
 
-Instead of being just another cache or database, Janus provides a modular
-architecture where protocols, storage engines, cache policies and distributed
-features can be combined like building blocks.
+A modular **data kernel** written in Rust.
 
-## Goals
+Janus explores protocols, storage engines, and cache building blocks behind a small execution core — not as a drop-in replacement for existing databases.
 
-- Learn Rust deeply
-- Explore distributed systems
-- Experiment with storage engines
-- Build a production-grade architecture
-- Keep everything modular
+## Overview
 
-## Non-goals
+- Layered design: transport, protocol, serializer, kernel, storage
+- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE`)
+- Storage behind a trait so engines can be swapped later
 
-- Replace Redis
-- Replace PostgreSQL
-- Be production-ready in the first versions
+This project does **not**:
+
+- Replace Redis or PostgreSQL
+- Aim to be production-ready in early versions
+- Bundle every Redis command or clustered topology on day one
+
+## Status
+
+Early development. TCP listen on `0.0.0.0:6380` with RESP `SET` / `GET` / `DEL` over an in-memory store.
+
+## Install / build
+
+Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021).
+
+```bash
+git clone https://github.com/samuelfabel/janus.git
+cd janus
+cargo test
+cargo build --release
+```
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Vision](docs/vision.md)
+- [Roadmap](docs/roadmap.md)
+- [Glossary](docs/glossary.md)
+- [Engineering principles](docs/engineering.md)
+- [ADRs](docs/adr/)
+
+## Development
+
+```bash
+cargo test
+cargo check
+```
+
+Optional local git hooks (rejects tool co-author trailers in commit messages):
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). This project follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)

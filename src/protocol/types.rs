@@ -1,3 +1,1 @@
-pub struct ExecutionResult {
-    pub offset: usize,
-}
+//! Protocol-layer shared types (reserved for future error/offset helpers).

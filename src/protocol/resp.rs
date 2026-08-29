@@ -1,116 +1,72 @@
-///! This file contains the implementation of the RESP (REdis Serialization Protocol) protocol.
-use crate::{kernel::kernel::Kernel, serializer::Serializer, storage::engine::StorageEngine};
+//! RESP protocol instance: decode → kernel → encode → callback.
+use crate::{
+    kernel::kernel::Kernel, protocol::Protocol, serializer::Serializer,
+    storage::engine::StorageEngine,
+};
 
-/// RespProtocol implements the RESP (REdis Serialization Protocol) protocol for handling incoming messages and executing commands using the kernel.
-pub struct RespProtocol<K, E, S>
+/// RespProtocol handles incoming RESP messages using a kernel and serializer.
+pub struct RespProtocol<E, S>
 where
     E: StorageEngine + Send + 'static,
-    K: Kernel<E> + Send + 'static,
     S: Serializer,
 {
-    /// The kernel to use for executing commands    
-    kernel: K,
-    /// The serializer to use for encoding and decoding messages
+    kernel: Kernel<E>,
     serializer: S,
 }
 
-impl<K, E, S> RespProtocol<K, E, S>
+impl<E, S> RespProtocol<E, S>
 where
     E: StorageEngine + Send + 'static,
-    K: Kernel<E> + Send + 'static,
     S: Serializer,
 {
-    /// * `kernel` - The kernel to use for executing commands
-    /// * `serializer` - The serializer to use for encoding and decoding messages
-    /// Handle incoming messages and execute commands using the kernel.
-    ///
-    /// # Arguments
-    /// * `message` - A byte slice representing the incoming message
-    /// * `on_response` - A closure that takes a byte slice representing the response
-    ///
-    /// # Returns
-    /// The number of bytes consumed from the incoming message    
-    fn handle(&mut self, message: &[u8], mut on_response: impl for<'a> FnMut(&'a [u8])) -> usize {
+    /// Create a new protocol instance.
+    pub fn new(kernel: Kernel<E>, serializer: S) -> Self {
+        RespProtocol { kernel, serializer }
+    }
+}
+
+impl<E, S> Protocol for RespProtocol<E, S>
+where
+    E: StorageEngine + Send + 'static,
+    S: Serializer,
+{
+    fn handle(&mut self, message: &[u8], mut on_response: impl FnMut(&[u8])) -> usize {
         let mut current = 0;
 
         for command in self.serializer.decode(message, &mut current) {
             let response = self.kernel.execute(&command);
-
-            on_response(self.serializer.encode(&command, &response));
+            let encoded = self.serializer.encode(&command, &response);
+            on_response(&encoded);
         }
 
         current
     }
 }
 
-impl<K, E, S> RespProtocol<K, E, S>
-where
-    E: StorageEngine + Send + 'static,
-    K: Kernel<E> + Send + 'static,
-    S: Serializer,
-{
-    /// Create a new instance of the protocol.
-    ///
-    /// # Arguments
-    /// * `kernel` - The kernel to use for executing commands
-    /// * `serializer` - The serializer to use for encoding and decoding messages
-    ///
-    /// # Returns
-    /// A new instance of the protocol
-    pub fn new(kernel: K, serializer: S) -> Self {
-        RespProtocol { kernel, serializer }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{
-        command::types::Command, kernel::kernel::MockKernel, protocol::resp::RespProtocol,
-        serializer::MockSerializer, storage::engine::MockStorageEngine,
-    };
+    use super::*;
+    use crate::{serializer::resp::RespSerializer, storage::memory::MemoryStorageEngine};
 
     #[test]
-    fn test_handle_single_complete_command() {
-        // Arrange
-        let storage_engine = MockStorageEngine::new();
-        let kernel = MockKernel::new(storage_engine);
-        let mut serializer = MockSerializer::new();
+    fn handle_set_then_get() {
+        let kernel = Kernel::new(MemoryStorageEngine::new());
+        let mut protocol = RespProtocol::new(kernel, RespSerializer);
 
-        serializer.expect_decode().returning(|_message, current| {
-            *current = 34;
-
-            let commands = vec![Command::Set {
-                key: b"key",
-                value: b"value",
-            }];
-
-            commands.into_iter()
-        });
-
-        kernel.expect_execute().returning(|command| {
-            match command {
-                Command::Set { key, value } => {
-                    // Simula a execução do comando SET
-                    Response::
-                }
-                _ => false,
-            }
-        });
-
-        let mut protocol = RespProtocol { kernel, serializer };
-
-        // Act
-
-        // Assert
-
-        let message = b"*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+        let set = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
         let mut responses = Vec::new();
-
-        let bytes_consumed = protocol.handle(message, |response| {
+        let consumed = protocol.handle(set, |response| {
             responses.push(response.to_vec());
         });
+        assert_eq!(consumed, set.len());
+        assert_eq!(responses, vec![b"+OK\r\n".to_vec()]);
 
-        assert_eq!(bytes_consumed, message.len());
-        assert_eq!(responses.len(), 1);
+        let get = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+        responses.clear();
+        let consumed = protocol.handle(get, |response| {
+            responses.push(response.to_vec());
+        });
+        assert_eq!(consumed, get.len());
+        assert_eq!(responses, vec![b"$5\r\nvalue\r\n".to_vec()]);
     }
 }

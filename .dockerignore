@@ -1,0 +1,13 @@
+target
+.git
+.github
+.githooks
+.vscode
+.devcontainer
+docs
+**/*.md
+!README.md
+.env
+.env.*
+*.swp
+.DS_Store

@@ -1,6 +1,8 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
 use crate::{
-    kernel::kernel::Kernel, protocol::Protocol, serializer::Serializer,
+    kernel::kernel::Kernel,
+    protocol::Protocol,
+    serializer::{DecodeOutcome, Serializer},
     storage::engine::StorageEngine,
 };
 
@@ -33,10 +35,20 @@ where
     fn handle(&mut self, message: &[u8], mut on_response: impl FnMut(&[u8])) -> usize {
         let mut current = 0;
 
-        for command in self.serializer.decode(message, &mut current) {
-            let response = self.kernel.execute(&command);
-            let encoded = self.serializer.encode(&command, &response);
-            on_response(&encoded);
+        while current < message.len() {
+            match self.serializer.decode_one(&message[current..]) {
+                DecodeOutcome::Incomplete => break,
+                DecodeOutcome::Ok { command, consumed } => {
+                    let response = self.kernel.execute(&command);
+                    let encoded = self.serializer.encode(&response);
+                    on_response(&encoded);
+                    current += consumed;
+                }
+                DecodeOutcome::Invalid { .. } | DecodeOutcome::UnknownCommand { .. } => {
+                    // v1: stop without consuming the bad frame; transport closes later.
+                    break;
+                }
+            }
         }
 
         current

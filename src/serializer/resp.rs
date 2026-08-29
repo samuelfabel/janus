@@ -1,18 +1,18 @@
-//! RespSerializer implements RESP encoding and decoding for the v1 command subset.
+//! RESP2 subset codec for SET / GET / DEL(DELETE).
+
 use crate::{
     command::types::Command,
     response::types::Response,
-    serializer::Serializer,
+    serializer::{DecodeOutcome, Serializer},
     shared::helpers::{count_digits, find_crlf, parse_integer},
 };
 
-/// RespSerializer implements RESP encoding and decoding.
+/// RESP serializer for the v1 command subset.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct RespSerializer;
 
 impl Serializer for RespSerializer {
-    type DecodeIter<'a> = std::vec::IntoIter<Command<'a>>;
-
-    fn encode(&self, _: &Command<'_>, response: &Response) -> Vec<u8> {
+    fn encode(&self, response: &Response) -> Vec<u8> {
         match response {
             Response::Empty => b"+OK\r\n".to_vec(),
             Response::Value(None) => b"$-1\r\n".to_vec(),
@@ -31,209 +31,282 @@ impl Serializer for RespSerializer {
         }
     }
 
-    fn decode<'a>(&self, data: &'a [u8], cursor: &mut usize) -> Self::DecodeIter<'a> {
-        let mut commands = Vec::new();
-
-        loop {
-            let start = *cursor;
-            match parse_one_command(data, cursor) {
-                ParseResult::Command(cmd) => commands.push(cmd),
-                ParseResult::Incomplete => {
-                    *cursor = start;
-                    break;
-                }
-                ParseResult::Invalid => break,
-            }
+    fn decode_one<'a>(&self, input: &'a [u8]) -> DecodeOutcome<'a> {
+        if input.is_empty() {
+            return DecodeOutcome::Incomplete;
         }
-
-        commands.into_iter()
-    }
-}
-
-enum ParseResult<'a> {
-    Command(Command<'a>),
-    Incomplete,
-    Invalid,
-}
-
-fn parse_one_command<'a>(data: &'a [u8], cursor: &mut usize) -> ParseResult<'a> {
-    if *cursor >= data.len() {
-        return ParseResult::Incomplete;
-    }
-    if data[*cursor] != b'*' {
-        return ParseResult::Invalid;
-    }
-    *cursor += 1;
-
-    let Some(crlf) = find_crlf(&data[*cursor..]) else {
-        return ParseResult::Incomplete;
-    };
-    let Ok(arg_count) = parse_integer(&data[*cursor..*cursor + crlf]) else {
-        return ParseResult::Invalid;
-    };
-    *cursor += crlf + 2;
-
-    if arg_count == 0 {
-        return ParseResult::Invalid;
-    }
-
-    let Some(cmd_name) = read_bulk_string(data, cursor) else {
-        return match bulk_status(data, *cursor) {
-            BulkStatus::Incomplete => ParseResult::Incomplete,
-            BulkStatus::Invalid => ParseResult::Invalid,
-        };
-    };
-
-    match cmd_name {
-        b"GET" | b"get" => {
-            if arg_count != 2 {
-                return ParseResult::Invalid;
-            }
-            match read_bulk_string(data, cursor) {
-                Some(key) => ParseResult::Command(Command::Get { key }),
-                None => match bulk_status(data, *cursor) {
-                    BulkStatus::Incomplete => ParseResult::Incomplete,
-                    BulkStatus::Invalid => ParseResult::Invalid,
-                },
-            }
-        }
-        b"SET" | b"set" => {
-            if arg_count != 3 {
-                return ParseResult::Invalid;
-            }
-            let Some(key) = read_bulk_string(data, cursor) else {
-                return match bulk_status(data, *cursor) {
-                    BulkStatus::Incomplete => ParseResult::Incomplete,
-                    BulkStatus::Invalid => ParseResult::Invalid,
-                };
+        if input[0] != b'*' {
+            return DecodeOutcome::Invalid {
+                message: "expected array",
             };
-            match read_bulk_string(data, cursor) {
-                Some(value) => ParseResult::Command(Command::Set { key, value }),
-                None => match bulk_status(data, *cursor) {
-                    BulkStatus::Incomplete => ParseResult::Incomplete,
-                    BulkStatus::Invalid => ParseResult::Invalid,
-                },
-            }
         }
-        b"DEL" | b"del" | b"DELETE" | b"delete" => {
-            if arg_count != 2 {
-                return ParseResult::Invalid;
-            }
-            match read_bulk_string(data, cursor) {
-                Some(key) => ParseResult::Command(Command::Delete { key }),
-                None => match bulk_status(data, *cursor) {
-                    BulkStatus::Incomplete => ParseResult::Incomplete,
-                    BulkStatus::Invalid => ParseResult::Invalid,
-                },
-            }
+
+        let mut cursor = 1usize;
+        let Some(crlf) = find_crlf(&input[cursor..]) else {
+            return DecodeOutcome::Incomplete;
+        };
+        let Ok(arg_count) = parse_integer(&input[cursor..cursor + crlf]) else {
+            return DecodeOutcome::Invalid {
+                message: "invalid array length",
+            };
+        };
+        cursor += crlf + 2;
+
+        if arg_count == 0 {
+            return DecodeOutcome::Invalid {
+                message: "empty array",
+            };
         }
-        _ => ParseResult::Invalid,
+
+        let verb = match read_bulk(input, &mut cursor) {
+            BulkRead::Ok(v) => v,
+            BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+            BulkRead::Invalid => {
+                return DecodeOutcome::Invalid {
+                    message: "invalid bulk verb",
+                }
+            }
+        };
+
+        let verb_upper = normalize_verb(verb);
+
+        match verb_upper.as_slice() {
+            b"SET" => {
+                if arg_count != 3 {
+                    return DecodeOutcome::Invalid {
+                        message: "SET arity",
+                    };
+                }
+                let key = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid SET key",
+                        }
+                    }
+                };
+                let value = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid SET value",
+                        }
+                    }
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Set { key, value },
+                    consumed: cursor,
+                }
+            }
+            b"GET" => {
+                if arg_count != 2 {
+                    return DecodeOutcome::Invalid {
+                        message: "GET arity",
+                    };
+                }
+                let key = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid GET key",
+                        }
+                    }
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Get { key },
+                    consumed: cursor,
+                }
+            }
+            b"DEL" | b"DELETE" => {
+                if arg_count != 2 {
+                    return DecodeOutcome::Invalid {
+                        message: "DEL arity",
+                    };
+                }
+                let key = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid DEL key",
+                        }
+                    }
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Delete { key },
+                    consumed: cursor,
+                }
+            }
+            _ => DecodeOutcome::UnknownCommand {
+                name: verb.to_vec(),
+            },
+        }
     }
 }
 
-enum BulkStatus {
+enum BulkRead<'a> {
+    Ok(&'a [u8]),
     Incomplete,
     Invalid,
 }
 
-fn bulk_status(data: &[u8], cursor: usize) -> BulkStatus {
-    if cursor >= data.len() {
-        return BulkStatus::Incomplete;
+fn read_bulk<'a>(input: &'a [u8], cursor: &mut usize) -> BulkRead<'a> {
+    if *cursor >= input.len() {
+        return BulkRead::Incomplete;
     }
-    if data[cursor] != b'$' {
-        return BulkStatus::Invalid;
+    if input[*cursor] != b'$' {
+        return BulkRead::Invalid;
     }
-    let rest = &data[cursor + 1..];
-    let Some(crlf) = find_crlf(rest) else {
-        return BulkStatus::Incomplete;
+    let after_dollar = *cursor + 1;
+    let Some(crlf) = find_crlf(&input[after_dollar..]) else {
+        return BulkRead::Incomplete;
     };
-    let Ok(len) = parse_integer(&rest[..crlf]) else {
-        return BulkStatus::Invalid;
+    let Ok(len) = parse_integer(&input[after_dollar..after_dollar + crlf]) else {
+        return BulkRead::Invalid;
     };
-    let payload_start = cursor + 1 + crlf + 2;
-    if payload_start + len + 2 > data.len() {
-        BulkStatus::Incomplete
-    } else {
-        BulkStatus::Invalid
+    let payload_start = after_dollar + crlf + 2;
+    if payload_start + len + 2 > input.len() {
+        return BulkRead::Incomplete;
     }
+    if &input[payload_start + len..payload_start + len + 2] != b"\r\n" {
+        return BulkRead::Invalid;
+    }
+    let payload = &input[payload_start..payload_start + len];
+    *cursor = payload_start + len + 2;
+    BulkRead::Ok(payload)
 }
 
-#[inline]
-fn read_bulk_string<'a>(data: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
-    let start = *cursor;
-    if start >= data.len() || data[start] != b'$' {
-        return None;
-    }
-
-    let after_dollar = start + 1;
-    let crlf = find_crlf(&data[after_dollar..])?;
-    let len = parse_integer(&data[after_dollar..after_dollar + crlf]).ok()?;
-    let payload_start = after_dollar + crlf + 2;
-    if payload_start + len + 2 > data.len() {
-        return None;
-    }
-
-    let payload = &data[payload_start..payload_start + len];
-    *cursor = payload_start + len + 2;
-    Some(payload)
+fn normalize_verb(verb: &[u8]) -> Vec<u8> {
+    verb.iter().map(|b| b.to_ascii_uppercase()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::types::Command;
+    use crate::{
+        command::types::Command, kernel::kernel::Kernel, response::types::Response,
+        storage::memory::MemoryStorageEngine,
+    };
+
+    const SET_FIXTURE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+    const GET_FIXTURE: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+    const DEL_FIXTURE: &[u8] = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
 
     #[test]
-    fn decode_set_get_del_fixtures() {
-        let serializer = RespSerializer;
-        let set = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
-        let mut cursor = 0;
-        let commands: Vec<_> = serializer.decode(set, &mut cursor).collect();
-        assert_eq!(cursor, set.len());
-        assert!(matches!(
-            commands.as_slice(),
-            [Command::Set {
-                key: b"key",
-                value: b"value"
-            }]
-        ));
+    fn decode_set_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(SET_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Set { key, value },
+                consumed,
+            } => {
+                assert_eq!(key, b"key");
+                assert_eq!(value, b"value");
+                assert_eq!(consumed, SET_FIXTURE.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 
-        let get = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
-        cursor = 0;
-        let commands: Vec<_> = serializer.decode(get, &mut cursor).collect();
-        assert!(matches!(commands.as_slice(), [Command::Get { key: b"key" }]));
-
-        let del = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
-        cursor = 0;
-        let commands: Vec<_> = serializer.decode(del, &mut cursor).collect();
+    #[test]
+    fn decode_get_and_del_fixtures() {
+        let s = RespSerializer;
+        match s.decode_one(GET_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Get { key },
+                consumed,
+            } => {
+                assert_eq!(key, b"key");
+                assert_eq!(consumed, GET_FIXTURE.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match s.decode_one(DEL_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Delete { key },
+                ..
+            } => assert_eq!(key, b"key"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let delete = b"*2\r\n$6\r\nDELETE\r\n$3\r\nkey\r\n";
         assert!(matches!(
-            commands.as_slice(),
-            [Command::Delete { key: b"key" }]
+            s.decode_one(delete),
+            DecodeOutcome::Ok {
+                command: Command::Delete { .. },
+                ..
+            }
         ));
     }
 
     #[test]
-    fn decode_incomplete_does_not_consume() {
-        let serializer = RespSerializer;
-        let partial = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nval";
-        let mut cursor = 0;
-        let commands: Vec<_> = serializer.decode(partial, &mut cursor).collect();
-        assert!(commands.is_empty());
-        assert_eq!(cursor, 0);
-    }
-
-    #[test]
-    fn encode_empty_and_deleted() {
-        let serializer = RespSerializer;
-        let cmd = Command::Set {
-            key: b"k",
-            value: b"v",
-        };
-        assert_eq!(serializer.encode(&cmd, &Response::Empty), b"+OK\r\n");
-        assert_eq!(serializer.encode(&cmd, &Response::Deleted(true)), b":1\r\n");
+    fn encode_response_variants() {
+        let s = RespSerializer;
+        assert_eq!(s.encode(&Response::Empty), b"+OK\r\n");
+        assert_eq!(s.encode(&Response::Value(None)), b"$-1\r\n");
+        assert_eq!(s.encode(&Response::Deleted(true)), b":1\r\n");
+        assert_eq!(s.encode(&Response::Deleted(false)), b":0\r\n");
         assert_eq!(
-            serializer.encode(&cmd, &Response::Deleted(false)),
-            b":0\r\n"
+            s.encode(&Response::Value(Some(b"value".to_vec()))),
+            b"$5\r\nvalue\r\n"
         );
+        assert_eq!(
+            s.encode(&Response::Value(Some(b"a\r\nb".to_vec()))),
+            b"$4\r\na\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn truncated_set_is_incomplete() {
+        let s = RespSerializer;
+        let partial = &SET_FIXTURE[..SET_FIXTURE.len() - 3];
+        assert_eq!(s.decode_one(partial), DecodeOutcome::Incomplete);
+    }
+
+    #[test]
+    fn unknown_verb_is_unknown_command() {
+        let s = RespSerializer;
+        let input = b"*2\r\n$4\r\nPING\r\n$3\r\nkey\r\n";
+        match s.decode_one(input) {
+            DecodeOutcome::UnknownCommand { name } => assert_eq!(name, b"PING"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrong_arity_is_invalid() {
+        let s = RespSerializer;
+        // SET with only one bulk after verb → arity 2 instead of 3
+        let input = b"*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n";
+        assert!(matches!(
+            s.decode_one(input),
+            DecodeOutcome::Invalid { message: "SET arity" }
+        ));
+    }
+
+    #[test]
+    fn decode_kernel_encode_roundtrip() {
+        let s = RespSerializer;
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+
+        let DecodeOutcome::Ok {
+            command: set_cmd, ..
+        } = s.decode_one(SET_FIXTURE)
+        else {
+            panic!("set decode");
+        };
+        let set_resp = kernel.execute(&set_cmd);
+        assert_eq!(s.encode(&set_resp), b"+OK\r\n");
+
+        let DecodeOutcome::Ok {
+            command: get_cmd, ..
+        } = s.decode_one(GET_FIXTURE)
+        else {
+            panic!("get decode");
+        };
+        let get_resp = kernel.execute(&get_cmd);
+        assert_eq!(s.encode(&get_resp), b"$5\r\nvalue\r\n");
     }
 }

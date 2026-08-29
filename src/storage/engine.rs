@@ -1,29 +1,21 @@
-//! This module defines the trait for the storage engine
+//! Storage engine trait: opaque byte keys and values.
 
-/// Define the trait for the storage engine.
+/// Pluggable key/value storage used by the kernel.
+///
+/// Keys and values are opaque byte sequences (including empty). There is no
+/// TTL, encoding, or I/O error surface in the v1 memory engine.
 pub trait StorageEngine: Send {
-    /// Define the methods for the storage engine
+    /// Returns the value for `key`, if present.
     ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    ///
-    /// # Returns
-    /// * `Option<&[u8]>` - An optional slice of bytes representing the value
-    fn get<'a>(&'a self, key: &[u8]) -> Option<&'a [u8]>;
+    /// The borrowed slice remains valid until the next `&mut self` call on this
+    /// engine.
+    fn get(&self, key: &[u8]) -> Option<&[u8]>;
 
-    /// Stores the value associated with the given key.
-    ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    /// * `value` - A vector of bytes representing the value
+    /// Stores an owned copy of `value` under `key`, replacing any previous value.
     fn set(&mut self, key: &[u8], value: &[u8]);
 
-    /// Deletes the value associated with the given key.
+    /// Removes `key` if it exists.
     ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    ///
-    /// # Returns
-    /// * `bool` - A boolean indicating whether the key was found and deleted
+    /// Returns `true` when a value was removed, `false` when the key was absent.
     fn delete(&mut self, key: &[u8]) -> bool;
 }

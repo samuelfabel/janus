@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `StorageEngine` trait and `MemoryStorageEngine` with unit tests for get/set/delete
 - Public landing page under `site/` with GitHub Pages workflow
 - Multi-stage `Dockerfile`, `.dockerignore`, and `compose.yaml`
 - TCP listener with `--bind` / `JANUS_BIND` (default `0.0.0.0:6380`)
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests
 - Cargo edition set to `2021` for stable toolchain compatibility
 - README expanded with build, docs, and contribution links
 

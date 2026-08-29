@@ -1,63 +1,46 @@
-//! This module implements an in-memory storage engine that adheres to the StorageEngine trait defined in engine.rs. It uses a HashMap to store key-value pairs in memory.
+//! In-memory [`StorageEngine`] backed by a [`HashMap`].
 
 use std::collections::HashMap;
 
 use crate::storage::engine::StorageEngine;
 
-/// Define the MemoryStorageEngine struct that implements the StorageEngine trait
+/// HashMap-backed storage engine for the v1 milestone.
 pub struct MemoryStorageEngine {
-    // In-memory storage represented as a HashMap
-    storage: HashMap<Vec<u8>, Vec<u8>>,
+    map: HashMap<Vec<u8>, Vec<u8>>,
 }
 
-/// Implement the StorageEngine trait for MemoryStorageEngine
 impl MemoryStorageEngine {
-    /// Create a new instance of MemoryStorageEngine
-    ///
-    /// # Returns
-    /// * `Self` - A new instance of MemoryStorageEngine with an empty HashMap
+    /// Creates an empty in-memory engine.
     pub fn new() -> Self {
         MemoryStorageEngine {
-            storage: HashMap::new(),
+            map: HashMap::new(),
         }
     }
 }
 
+impl Default for MemoryStorageEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StorageEngine for MemoryStorageEngine {
-    /// Get the value for a given key
-    ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    ///
-    /// # Returns
-    /// * `Option<&[u8]>` - An optional slice of bytes representing the value
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        self.storage.get(key).map(|v| v.as_slice())
+        self.map.get(key).map(|v| v.as_slice())
     }
 
-    /// Stores the value associated with the given key.
-    ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    /// * `value` - A vector of bytes representing the value
     fn set(&mut self, key: &[u8], value: &[u8]) {
-        self.storage.insert(key.to_vec(), value.to_vec());
+        self.map.insert(key.to_vec(), value.to_vec());
     }
 
-    /// Deletes the value associated with the given key.
-    ///
-    /// # Arguments
-    /// * `key` - A vector of bytes representing the key
-    ///
-    /// # Returns
-    /// * `bool` - A boolean indicating whether the key was found and deleted
     fn delete(&mut self, key: &[u8]) -> bool {
-        self.storage.remove(key).is_some()
+        self.map.remove(key).is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::storage::engine::StorageEngine;
 
     const KEY: &[u8] = b"key";
@@ -65,81 +48,55 @@ mod tests {
     const VALUE2: &[u8] = b"value2";
 
     #[test]
-    fn delete_existing_key_remove_it_and_return_true() {
-        // Assert
-        let mut target = super::MemoryStorageEngine::new();
-
-        // Act
-        let result = target.delete(KEY);
-
-        // Assert
-        assert!(!result);
+    fn set_then_get_returns_value() {
+        let mut engine = MemoryStorageEngine::new();
+        engine.set(KEY, VALUE);
+        assert_eq!(engine.get(KEY), Some(VALUE));
     }
 
     #[test]
-    fn delete_non_existing_key_return_false() {
-        // Assert
-        let mut target = super::MemoryStorageEngine::new();
-
-        // Act
-        let result = target.delete(KEY);
-
-        // Assert
-        assert!(!result);
+    fn get_missing_key_returns_none() {
+        let engine = MemoryStorageEngine::new();
+        assert_eq!(engine.get(KEY), None);
     }
 
     #[test]
-    fn execute_get_non_existing_key_return_none() {
-        // Assert
-        let target = super::MemoryStorageEngine::new();
-
-        // Act
-        let result = target.get(KEY);
-
-        // Assert
-        assert!(result.is_none());
+    fn set_overwrites_previous_value() {
+        let mut engine = MemoryStorageEngine::new();
+        engine.set(KEY, VALUE);
+        engine.set(KEY, VALUE2);
+        assert_eq!(engine.get(KEY), Some(VALUE2));
     }
 
     #[test]
-    fn execute_get_existing_key_return_value() {
-        // Assert
-        let mut target = super::MemoryStorageEngine::new();
-        target.storage.insert(KEY.to_vec(), VALUE.to_vec());
-
-        // Act
-        let result = target.get(KEY);
-
-        // Assert
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), VALUE);
+    fn delete_existing_key_returns_true_and_removes() {
+        let mut engine = MemoryStorageEngine::new();
+        engine.set(KEY, VALUE);
+        assert!(engine.delete(KEY));
+        assert_eq!(engine.get(KEY), None);
     }
 
     #[test]
-    fn execute_set_key_non_existing_key_store_it_and_return_empty() {
-        // Assert
-        let mut target = super::MemoryStorageEngine::new();
-
-        // Act
-        target.set(KEY, VALUE);
-
-        let stored_value = target.get(KEY).unwrap();
-
-        // Assert
-        assert_eq!(stored_value, VALUE);
+    fn delete_missing_key_returns_false() {
+        let mut engine = MemoryStorageEngine::new();
+        assert!(!engine.delete(KEY));
     }
 
     #[test]
-    fn execute_set_key_store_it_and_return_empty() {
-        // Assert
-        let mut target = super::MemoryStorageEngine::new();
-        target.storage.insert(KEY.to_vec(), VALUE.to_vec());
+    fn empty_key_and_empty_value_are_allowed() {
+        let mut engine = MemoryStorageEngine::new();
+        engine.set(b"", b"");
+        assert_eq!(engine.get(b""), Some(b"".as_slice()));
+        assert!(engine.delete(b""));
+        assert_eq!(engine.get(b""), None);
+    }
 
-        // Act
-        target.set(KEY, VALUE2);
-
-        let stored_value = target.get(KEY).unwrap();
-
-        // Assert
-        assert_eq!(stored_value, VALUE2);
+    #[test]
+    fn binary_opaque_bytes_roundtrip() {
+        let mut engine = MemoryStorageEngine::new();
+        let key = b"\x00\xffkey";
+        let value = b"val\r\n\x00ue";
+        engine.set(key, value);
+        assert_eq!(engine.get(key), Some(value.as_slice()));
     }
 }

@@ -6,3 +6,7 @@
 .vscode/
 *.swp
 .DS_Store
+
+# Landing site
+site/node_modules/
+site/dist/

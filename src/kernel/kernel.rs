@@ -1,5 +1,7 @@
 //! Kernel module that provides the core functionality of the application.
 
+use mockall::automock;
+
 use crate::{command::types::Command, response::types::Response, storage::engine::StorageEngine};
 
 /// Kernel struct that holds a reference to the storage engine.
@@ -11,7 +13,8 @@ pub struct Kernel<T: StorageEngine> {
     storage: T,
 }
 
-impl<T: StorageEngine> Kernel<T> {
+for<'a> #[automock]
+impl<T: StorageEngine + 'static> Kernel<T> {
     /// Creates a new instance of the Kernel with the given storage engine.
     pub fn new(storage: T) -> Self {
         Kernel { storage }
@@ -20,11 +23,11 @@ impl<T: StorageEngine> Kernel<T> {
     /// Executes a command by delegating to the appropriate method on the storage engine.
     ///
     /// # Arguments
-    /// * `command` - The command to execute.
+    /// * `command` - The command to execute. It contains the key and value for the operation.
     ///
     /// # Returns
-    /// * `CommandResult` - The result of executing the command.
-    pub fn execute(&mut self, command: &Command) -> Response {
+    /// * `Response` - The result of executing the command.
+    pub fn execute(&mut self, command: &Command<'a>) -> Response {
         match command {
             Command::Delete { key } => Response::Boolean(self.storage.delete(key)),
             Command::Get { key } => Response::Value(self.storage.get(key).map(|v| v.to_vec())),
@@ -85,7 +88,7 @@ mod tests {
         let mut target = super::Kernel::new(storage);
 
         // Act
-        let result = target.execute(&Command::Delete { key: KEY.to_vec() });
+        let result = target.execute(&Command::Delete { key: KEY });
 
         // Assert
         assert!(matches!(result, Response::Boolean(true)));
@@ -99,7 +102,7 @@ mod tests {
         let mut target = super::Kernel::new(storage);
 
         // Act
-        let result = target.execute(&Command::Delete { key: KEY.to_vec() });
+        let result = target.execute(&Command::Delete { key: KEY });
 
         // Assert
         assert!(matches!(result, Response::Boolean(false)));
@@ -113,7 +116,7 @@ mod tests {
         let mut target = super::Kernel::new(storage);
 
         // Act
-        let result = target.execute(&Command::Get { key: KEY.to_vec() });
+        let result = target.execute(&Command::Get { key: KEY });
 
         // Assert
         assert!(matches!(result, Response::Value(None)));
@@ -127,7 +130,7 @@ mod tests {
         let mut target = super::Kernel::new(storage);
 
         // Act
-        let result = target.execute(&Command::Get { key: KEY.to_vec() });
+        let result = target.execute(&Command::Get { key: KEY });
 
         // Assert
         match result {
@@ -145,11 +148,11 @@ mod tests {
 
         // Act
         let result = target.execute(&Command::Set {
-            key: KEY.to_vec(),
-            value: VALUE.to_vec(),
+            key: KEY,
+            value: VALUE,
         });
 
-        let stored_value = target.execute(&Command::Get { key: KEY.to_vec() });
+        let stored_value = target.execute(&Command::Get { key: KEY });
 
         // Assert
         assert!(matches!(result, Response::Empty));
@@ -168,11 +171,11 @@ mod tests {
 
         // Act
         let result = target.execute(&Command::Set {
-            key: KEY.to_vec(),
-            value: VALUE2.to_vec(),
+            key: KEY,
+            value: VALUE2,
         });
 
-        let stored_value = target.execute(&Command::Get { key: KEY.to_vec() });
+        let stored_value = target.execute(&Command::Get { key: KEY });
 
         // Assert
         assert!(matches!(result, Response::Empty));

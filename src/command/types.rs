@@ -1,9 +1,9 @@
 // Kind of command operations
-pub enum Command {
+pub enum Command<'a> {
     //Delete operation
-    Delete { key: Vec<u8> },
+    Delete { key: &'a [u8] },
     //Get operation
-    Get { key: Vec<u8> },
+    Get { key: &'a [u8] },
     //Set operation
-    Set { key: Vec<u8>, value: Vec<u8> },
+    Set { key: &'a [u8], value: &'a [u8] },
 }

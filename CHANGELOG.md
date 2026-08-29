@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests
 - Cargo edition set to `2021` for stable toolchain compatibility

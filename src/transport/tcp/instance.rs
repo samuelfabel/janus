@@ -32,14 +32,16 @@ impl<T: Protocol + Send + 'static> TcpInstance<T> {
                 Ok(bytes_read) => {
                     let total_available = leftover + bytes_read;
 
-                    let consumed = self.read(total_available);
-
-                    if consumed < total_available {
-                        leftover = total_available - consumed;
-
-                        self.buffer.copy_within(consumed..total_available, 0);
-                    } else {
-                        leftover = 0;
+                    match self.read(total_available) {
+                        Ok(consumed) => {
+                            if consumed < total_available {
+                                leftover = total_available - consumed;
+                                self.buffer.copy_within(consumed..total_available, 0);
+                            } else {
+                                leftover = 0;
+                            }
+                        }
+                        Err(()) => break,
                     }
                 }
                 Err(_) => break,
@@ -47,17 +49,19 @@ impl<T: Protocol + Send + 'static> TcpInstance<T> {
         }
     }
 
-    pub fn read(&mut self, bytes_read: usize) -> usize {
-        if bytes_read > 0 {
-            let protocol = &mut self.protocol;
-            let stream = &mut self.instance;
-            let chunk = &self.buffer[..bytes_read];
-
-            return protocol.handle(chunk, |response| {
-                let _ = stream.write_all(response);
-            });
+    pub fn read(&mut self, bytes_read: usize) -> Result<usize, ()> {
+        if bytes_read == 0 {
+            return Ok(0);
         }
 
-        0
+        let protocol = &mut self.protocol;
+        let stream = &mut self.instance;
+        let chunk = &self.buffer[..bytes_read];
+
+        protocol
+            .execute(chunk, |response| {
+                let _ = stream.write_all(response);
+            })
+            .map_err(|_| ())
     }
 }

@@ -1,10 +1,8 @@
 //! Kernel module that provides the core functionality of the application.
 
-use mockall::automock;
-
 use crate::{command::types::Command, response::types::Response, storage::engine::StorageEngine};
 
-/// Kernel struct that holds a reference to the storage engine.
+/// Kernel struct that holds a storage engine.
 ///
 /// # Type Parameters
 /// * `T` - A type that implements the `StorageEngine` trait.
@@ -13,21 +11,14 @@ pub struct Kernel<T: StorageEngine> {
     storage: T,
 }
 
-for<'a> #[automock]
-impl<T: StorageEngine + 'static> Kernel<T> {
+impl<T: StorageEngine> Kernel<T> {
     /// Creates a new instance of the Kernel with the given storage engine.
     pub fn new(storage: T) -> Self {
         Kernel { storage }
     }
 
     /// Executes a command by delegating to the appropriate method on the storage engine.
-    ///
-    /// # Arguments
-    /// * `command` - The command to execute. It contains the key and value for the operation.
-    ///
-    /// # Returns
-    /// * `Response` - The result of executing the command.
-    pub fn execute(&mut self, command: &Command<'a>) -> Response {
+    pub fn execute(&mut self, command: &Command<'_>) -> Response {
         match command {
             Command::Delete { key } => Response::Boolean(self.storage.delete(key)),
             Command::Get { key } => Response::Value(self.storage.get(key).map(|v| v.to_vec())),
@@ -82,57 +73,33 @@ mod tests {
 
     #[test]
     fn execute_delete_existing_key_remove_it_and_return_true() {
-        // Assert
         let storage = MockStorage::with_value();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Delete { key: KEY });
-
-        // Assert
         assert!(matches!(result, Response::Boolean(true)));
     }
 
     #[test]
     fn execute_delete_non_existing_key_return_false() {
-        // Assert
         let storage = MockStorage::new();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Delete { key: KEY });
-
-        // Assert
         assert!(matches!(result, Response::Boolean(false)));
     }
 
     #[test]
     fn execute_get_non_existing_key_return_none() {
-        // Assert
         let storage = MockStorage::new();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Get { key: KEY });
-
-        // Assert
         assert!(matches!(result, Response::Value(None)));
     }
 
     #[test]
     fn execute_get_existing_key_return_value() {
-        // Assert
         let storage = MockStorage::with_value();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Get { key: KEY });
-
-        // Assert
         match result {
             Response::Value(Some(value)) => assert_eq!(value, VALUE),
             _ => panic!("Expected value"),
@@ -141,20 +108,13 @@ mod tests {
 
     #[test]
     fn execute_set_key_non_existing_key_store_it_and_return_empty() {
-        // Assert
         let storage = MockStorage::new();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Set {
             key: KEY,
             value: VALUE,
         });
-
         let stored_value = target.execute(&Command::Get { key: KEY });
-
-        // Assert
         assert!(matches!(result, Response::Empty));
         match stored_value {
             Response::Value(Some(value)) => assert_eq!(value, VALUE),
@@ -164,20 +124,13 @@ mod tests {
 
     #[test]
     fn execute_set_key_store_it_and_return_empty() {
-        // Assert
         let storage = MockStorage::with_value();
-
         let mut target = super::Kernel::new(storage);
-
-        // Act
         let result = target.execute(&Command::Set {
             key: KEY,
             value: VALUE2,
         });
-
         let stored_value = target.execute(&Command::Get { key: KEY });
-
-        // Assert
         assert!(matches!(result, Response::Empty));
         match stored_value {
             Response::Value(Some(value)) => assert_eq!(value, VALUE2),

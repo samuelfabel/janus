@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Multi-stage `Dockerfile`, `.dockerignore`, and `compose.yaml`
 - TCP listener with `--bind` / `JANUS_BIND` (default `0.0.0.0:6380`)
 - RESP codec path for SET / GET / DEL wired through kernel + memory storage
 - Open-source community health files (Contributing, Code of Conduct, Security, Support)

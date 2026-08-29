@@ -21,7 +21,7 @@ This project does **not**:
 
 ## Status
 
-Early development. The kernel and in-memory storage already have unit tests; networking and RESP are next.
+Early development. The kernel and in-memory storage have unit tests. The binary currently ships a **TCP listen stub** (accepts connections; RESP command handling comes next). Default listen address: `0.0.0.0:6380` (avoids clashing with Redis on `6379`).
 
 ## Install / build
 
@@ -32,6 +32,43 @@ git clone https://github.com/samuelfabel/janus.git
 cd janus
 cargo test
 cargo build --release
+./target/release/janus --bind 127.0.0.1:6380
+```
+
+### Configuration
+
+| Source | Variable / flag | Default |
+|--------|-----------------|--------|
+| CLI | `--bind <ADDR>` | — |
+| Environment | `JANUS_BIND` | `0.0.0.0:6380` |
+
+## Docker
+
+Multi-stage image (Rust builder → Debian slim runtime, non-root user).
+
+```bash
+docker build -t janus:local .
+docker run --rm -p 6380:6380 janus:local
+```
+
+Override the listen address:
+
+```bash
+docker run --rm -p 6380:6380 -e JANUS_BIND=0.0.0.0:6380 janus:local
+# or
+docker run --rm -p 7000:7000 janus:local --bind 0.0.0.0:7000
+```
+
+Compose:
+
+```bash
+docker compose up --build
+```
+
+Verify the port is open (listen stub accepts and closes):
+
+```bash
+nc -zv 127.0.0.1 6380
 ```
 
 ## Documentation

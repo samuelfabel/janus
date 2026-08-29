@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Conventional Commits / branch guidelines
 - GitHub Actions CI (`cargo test`)
 - Git hooks to reject tool co-author trailers in commit messages
+- TCP listen stub with `--bind` / `JANUS_BIND` (default `0.0.0.0:6380`)
+- Multi-stage `Dockerfile`, `.dockerignore`, and `compose.yaml`
 
 ### Changed
 

@@ -1,0 +1,9 @@
+services:
+  janus:
+    build: .
+    image: janus:local
+    ports:
+      - "6380:6380"
+    environment:
+      JANUS_BIND: "0.0.0.0:6380"
+    restart: unless-stopped

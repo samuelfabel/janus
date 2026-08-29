@@ -34,6 +34,32 @@ cargo test
 cargo build --release
 ```
 
+
+## Docker
+
+Multi-stage image (Rust builder → Debian slim runtime, non-root user).
+
+Default listen address (when the server binary binds): `0.0.0.0:6380` via `JANUS_BIND` or `--bind` (avoids clashing with Redis on `6379`).
+
+```bash
+docker build -t janus:local .
+docker run --rm -p 6380:6380 janus:local
+```
+
+Override the listen address when the binary supports it:
+
+```bash
+docker run --rm -p 6380:6380 -e JANUS_BIND=0.0.0.0:6380 janus:local
+# or
+docker run --rm -p 7000:7000 janus:local --bind 0.0.0.0:7000
+```
+
+Compose:
+
+```bash
+docker compose up --build
+```
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)

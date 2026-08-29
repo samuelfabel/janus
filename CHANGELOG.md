@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Multi-stage `Dockerfile`, `.dockerignore`, and `compose.yaml`
 - Open-source community health files (Contributing, Code of Conduct, Security, Support)
 - Conventional Commits / branch guidelines
 - GitHub Actions CI (`cargo test`)

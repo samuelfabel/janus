@@ -56,6 +56,7 @@ impl StorageEngine for MemoryStorageEngine {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use crate::storage::engine::StorageEngine;
 

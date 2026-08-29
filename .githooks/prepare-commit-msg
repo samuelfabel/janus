@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Strip common tool co-author / attribution trailers before the message is finalized.
+set -euo pipefail
+
+msg_file="${1:-}"
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  exit 0
+fi
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+sed -E \
+  -e '/^[[:space:]]*Co-authored-by:[[:space:]].*[Cc]ursor/d' \
+  -e '/cursoragent@cursor\.com/d' \
+  -e '/noreply@cursor\./d' \
+  -e '/^[[:space:]]*Made-with:[[:space:]]*Cursor/d' \
+  -e '/^[[:space:]]*Generated-by:[[:space:]]*Cursor/d' \
+  -e '/^[[:space:]]*Assisted-by:[[:space:]]*Cursor/d' \
+  -e '/^[[:space:]]*Co-authored-by:[[:space:]].*[Cc]opilot/d' \
+  -e '/^[[:space:]]*Generated-by:/d' \
+  -e '/^[[:space:]]*Made-with:[[:space:]]*ChatGPT/d' \
+  "$msg_file" > "$tmp"
+
+mv "$tmp" "$msg_file"
+trap - EXIT
+exit 0

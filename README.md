@@ -21,7 +21,7 @@ This project does **not**:
 
 ## Status
 
-Early development. TCP listen on `0.0.0.0:6380` with RESP `SET` / `GET` / `DEL` over an in-memory store.
+v1 milestone: TCP listen with RESP `SET` / `GET` / `DEL` over an in-memory store. Default bind `0.0.0.0:6380`.
 
 ## Install / build
 
@@ -33,6 +33,26 @@ cd janus
 cargo test
 cargo build --release
 ```
+
+## Run the server
+
+```bash
+cargo run --release
+# listens on 0.0.0.0:6380
+
+cargo run --release -- --bind 127.0.0.1:6380
+# or
+JANUS_BIND=127.0.0.1:6380 cargo run --release
+```
+
+Quick check with any RESP client (optional), for example:
+
+```bash
+printf '*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n' | nc 127.0.0.1 6380
+printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
+```
+
+Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port).
 
 ## Docker
 

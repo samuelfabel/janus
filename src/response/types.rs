@@ -11,4 +11,6 @@ pub enum Response {
     Value(Option<Vec<u8>>),
     /// DELETE result: `true` if a key was removed.
     Deleted(bool),
+    /// Integer result (EXPIRE 0/1, TTL -2/-1/seconds).
+    Integer(i64),
 }

@@ -6,10 +6,14 @@
 /// without copying. Ownership can be introduced later if measured necessary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command<'a> {
-    /// Store `value` under `key`.
+    /// Store `value` under `key` (clears any previous TTL).
     Set { key: &'a [u8], value: &'a [u8] },
     /// Read the value for `key`.
     Get { key: &'a [u8] },
     /// Remove `key` if present.
     Delete { key: &'a [u8] },
+    /// Set a TTL of `seconds` on an existing key (`0` = expire immediately).
+    Expire { key: &'a [u8], seconds: u64 },
+    /// Query remaining TTL for `key`.
+    Ttl { key: &'a [u8] },
 }

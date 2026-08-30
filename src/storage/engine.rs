@@ -39,4 +39,7 @@ pub trait StorageEngine: Send {
 
     /// Remaining TTL for `key` (lazy-purges when expired).
     fn ttl(&mut self, key: &[u8]) -> Ttl;
+
+    /// Current time from the engine's clock (for absolute deadlines).
+    fn now(&self) -> Instant;
 }

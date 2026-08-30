@@ -1,4 +1,4 @@
-//! RESP2 subset codec for SET / GET / DEL(DELETE).
+//! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL.
 
 use crate::{
     command::types::Command,
@@ -147,6 +147,60 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"EXPIRE" => {
+                if arg_count != 3 {
+                    return DecodeOutcome::Invalid {
+                        message: "EXPIRE arity",
+                    };
+                }
+                let key = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid EXPIRE key",
+                        }
+                    }
+                };
+                let seconds_bytes = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid EXPIRE seconds",
+                        }
+                    }
+                };
+                let Ok(seconds) = parse_u64_decimal(seconds_bytes) else {
+                    return DecodeOutcome::Invalid {
+                        message: "EXPIRE seconds parse",
+                    };
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Expire { key, seconds },
+                    consumed: cursor,
+                }
+            }
+            b"TTL" => {
+                if arg_count != 2 {
+                    return DecodeOutcome::Invalid {
+                        message: "TTL arity",
+                    };
+                }
+                let key = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid TTL key",
+                        }
+                    }
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Ttl { key },
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -190,6 +244,24 @@ fn normalize_verb(verb: &[u8]) -> Vec<u8> {
     verb.iter().map(|b| b.to_ascii_uppercase()).collect()
 }
 
+/// Parse an unsigned decimal integer from ASCII digits (EXPIRE seconds).
+fn parse_u64_decimal(slice: &[u8]) -> Result<u64, ()> {
+    if slice.is_empty() {
+        return Err(());
+    }
+    let mut num: u64 = 0;
+    for &b in slice {
+        if !b.is_ascii_digit() {
+            return Err(());
+        }
+        num = num
+            .checked_mul(10)
+            .and_then(|n| n.checked_add((b - b'0') as u64))
+            .ok_or(())?;
+    }
+    Ok(num)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +273,8 @@ mod tests {
     const SET_FIXTURE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
     const GET_FIXTURE: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
     const DEL_FIXTURE: &[u8] = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
+    const EXPIRE_FIXTURE: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n10\r\n";
+    const TTL_FIXTURE: &[u8] = b"*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -255,6 +329,9 @@ mod tests {
         assert_eq!(s.encode(&Response::Value(None)), b"$-1\r\n");
         assert_eq!(s.encode(&Response::Deleted(true)), b":1\r\n");
         assert_eq!(s.encode(&Response::Deleted(false)), b":0\r\n");
+        assert_eq!(s.encode(&Response::Integer(1)), b":1\r\n");
+        assert_eq!(s.encode(&Response::Integer(-1)), b":-1\r\n");
+        assert_eq!(s.encode(&Response::Integer(-2)), b":-2\r\n");
         assert_eq!(
             s.encode(&Response::Value(Some(b"value".to_vec()))),
             b"$5\r\nvalue\r\n"
@@ -263,6 +340,71 @@ mod tests {
             s.encode(&Response::Value(Some(b"a\r\nb".to_vec()))),
             b"$4\r\na\r\nb\r\n"
         );
+    }
+
+    #[test]
+    fn decode_expire_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(EXPIRE_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Expire { key, seconds },
+                consumed,
+            } => {
+                assert_eq!(key, b"key");
+                assert_eq!(seconds, 10);
+                assert_eq!(consumed, EXPIRE_FIXTURE.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let lower = b"*3\r\n$6\r\nexpire\r\n$3\r\nkey\r\n$1\r\n0\r\n";
+        assert!(matches!(
+            s.decode_one(lower),
+            DecodeOutcome::Ok {
+                command: Command::Expire { seconds: 0, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_ttl_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(TTL_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Ttl { key },
+                consumed,
+            } => {
+                assert_eq!(key, b"key");
+                assert_eq!(consumed, TTL_FIXTURE.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expire_wrong_arity_and_bad_seconds_are_invalid() {
+        let s = RespSerializer;
+        let arity = b"*2\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n";
+        assert!(matches!(
+            s.decode_one(arity),
+            DecodeOutcome::Invalid {
+                message: "EXPIRE arity"
+            }
+        ));
+        let bad_secs = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$3\r\nabc\r\n";
+        assert!(matches!(
+            s.decode_one(bad_secs),
+            DecodeOutcome::Invalid {
+                message: "EXPIRE seconds parse"
+            }
+        ));
+        let ttl_arity = b"*3\r\n$3\r\nTTL\r\n$3\r\nkey\r\n$1\r\nx\r\n";
+        assert!(matches!(
+            s.decode_one(ttl_arity),
+            DecodeOutcome::Invalid {
+                message: "TTL arity"
+            }
+        ));
     }
 
     #[test]

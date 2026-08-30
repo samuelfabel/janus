@@ -1,3 +1,5 @@
+//! One TCP connection: read → append → protocol.execute → write → compact.
+
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -6,62 +8,66 @@ use std::{
 
 use crate::protocol::Protocol;
 
+/// Per-connection transport state (bytes only; no RESP knowledge).
 pub struct TcpInstance<T: Protocol + Send + 'static> {
-    instance: TcpStream,
+    stream: TcpStream,
     protocol: T,
-    buffer: [u8; 512],
+    buffer: Vec<u8>,
 }
 
 impl<T: Protocol + Send + 'static> TcpInstance<T> {
-    pub fn new(instance: TcpStream, protocol: T) {
-        let mut tcp_instance = TcpInstance {
-            instance,
+    /// Spawn a dedicated thread that owns this connection until EOF or error.
+    pub fn spawn(stream: TcpStream, protocol: T) {
+        let mut instance = TcpInstance {
+            stream,
             protocol,
-            buffer: [0; 512],
+            buffer: Vec::new(),
         };
-
-        thread::spawn(move || tcp_instance.run());
+        thread::spawn(move || instance.run());
     }
 
+    /// Drive the connection until the peer closes or a fatal error occurs.
     pub fn run(&mut self) {
-        let mut leftover = 0;
+        let mut read_buf = [0u8; 4096];
 
         loop {
-            match self.instance.read(&mut self.buffer[leftover..]) {
+            match self.stream.read(&mut read_buf) {
                 Ok(0) => break,
-                Ok(bytes_read) => {
-                    let total_available = leftover + bytes_read;
-
-                    match self.read(total_available) {
-                        Ok(consumed) => {
-                            if consumed < total_available {
-                                leftover = total_available - consumed;
-                                self.buffer.copy_within(consumed..total_available, 0);
-                            } else {
-                                leftover = 0;
-                            }
-                        }
-                        Err(()) => break,
+                Ok(n) => {
+                    self.buffer.extend_from_slice(&read_buf[..n]);
+                    if self.process().is_err() {
+                        break;
                     }
                 }
                 Err(_) => break,
-            };
+            }
         }
     }
 
-    pub fn read(&mut self, bytes_read: usize) -> Result<usize, ()> {
-        if bytes_read == 0 {
-            return Ok(0);
+    /// Normative transport step: execute + compact; write failure closes.
+    fn process(&mut self) -> Result<(), ()> {
+        let mut write_ok = true;
+        let offset = {
+            let Self {
+                protocol,
+                stream,
+                buffer,
+            } = self;
+            match protocol.execute(buffer, |response| {
+                if stream.write_all(response).is_err() {
+                    write_ok = false;
+                }
+            }) {
+                Ok(offset) => offset,
+                Err(_) => return Err(()),
+            }
+        };
+
+        if !write_ok {
+            return Err(());
         }
 
-        let protocol = &mut self.protocol;
-        let stream = &mut self.instance;
-        let chunk = &self.buffer[..bytes_read];
-
-        protocol
-            .execute(chunk, |response| {
-                let _ = stream.write_all(response);
-            })
-            .map_err(|_| ())
+        self.buffer.drain(..offset);
+        Ok(())
     }
 }

@@ -126,6 +126,10 @@ impl<C: Clock> StorageEngine for MemoryStorageEngine<C> {
             }
         }
     }
+
+    fn now(&self) -> Instant {
+        self.clock.now()
+    }
 }
 
 #[cfg(test)]

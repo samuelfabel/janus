@@ -18,6 +18,13 @@ impl Serializer for RespSerializer {
             Response::Value(None) => b"$-1\r\n".to_vec(),
             Response::Deleted(true) => b":1\r\n".to_vec(),
             Response::Deleted(false) => b":0\r\n".to_vec(),
+            Response::Integer(n) => {
+                let mut buffer = Vec::new();
+                buffer.push(b':');
+                buffer.extend_from_slice(n.to_string().as_bytes());
+                buffer.extend_from_slice(b"\r\n");
+                buffer
+            }
             Response::Value(Some(payload)) => {
                 let digits = count_digits(payload.len());
                 let mut buffer = Vec::with_capacity(1 + digits + 2 + payload.len() + 2);

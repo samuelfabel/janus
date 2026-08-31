@@ -10,7 +10,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 ## Overview
 
 - Layered design: transport, protocol, serializer, kernel, storage
-- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE`)
+- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL`)
 - Storage behind a trait so engines can be swapped later
 
 This project does **not**:
@@ -21,7 +21,7 @@ This project does **not**:
 
 ## Status
 
-v1 milestone: TCP listen with RESP `SET` / `GET` / `DEL` over an in-memory store. Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` over an in-memory store (lazy key expiry). Default bind `0.0.0.0:6380`.
 
 ## Install / build
 
@@ -49,10 +49,12 @@ Quick check with any RESP client (optional), for example:
 
 ```bash
 printf '*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n' | nc 127.0.0.1 6380
+printf '*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n10\r\n' | nc 127.0.0.1 6380
+printf '*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 ```
 
-Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port).
+Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL).
 
 ## Docker
 

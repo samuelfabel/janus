@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - In-memory storage supports per-key TTL with lazy expire (`expire_at` / `ttl`); `get` takes `&mut self`
 - Kernel `Expire` / `Ttl` commands and `Response::Integer` (Redis-style -2/-1/seconds)
 - RESP decode for `EXPIRE` / `TTL` fixtures; encode `Response::Integer`
+- TCP e2e for `EXPIRE` / `TTL` (before/after deadline) and README command surface
 - Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests

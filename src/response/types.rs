@@ -13,4 +13,6 @@ pub enum Response {
     Deleted(bool),
     /// Integer result (EXPIRE 0/1, TTL -2/-1/seconds).
     Integer(i64),
+    /// Error message (serializer maps to a RESP simple error).
+    Error(String),
 }

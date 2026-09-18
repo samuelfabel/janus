@@ -8,6 +8,7 @@ use std::{
 use crate::storage::{
     clock::{Clock, SystemClock},
     engine::{StorageEngine, Ttl},
+    snapshot::SnapshotEntry,
 };
 
 struct Entry {
@@ -129,6 +130,61 @@ impl<C: Clock> StorageEngine for MemoryStorageEngine<C> {
 
     fn now(&self) -> Instant {
         self.clock.now()
+    }
+
+    fn export_snapshot(&mut self) -> Vec<SnapshotEntry> {
+        let now = self.clock.now();
+        let expired: Vec<Vec<u8>> = self
+            .map
+            .iter()
+            .filter_map(|(key, entry)| match entry.deadline {
+                Some(deadline) if deadline <= now => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in expired {
+            self.map.remove(&key);
+        }
+
+        self.map
+            .iter()
+            .filter_map(|(key, entry)| {
+                let ttl_secs = match entry.deadline {
+                    None => None,
+                    Some(deadline) if deadline <= now => return None,
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(now);
+                        let secs = remaining.as_secs();
+                        // Sub-second remaining still counts as live → encode 1s.
+                        let secs = if secs == 0 && remaining.subsec_nanos() > 0 {
+                            1
+                        } else {
+                            secs
+                        };
+                        if secs == 0 {
+                            return None;
+                        }
+                        Some(secs)
+                    }
+                };
+                Some(SnapshotEntry {
+                    key: key.clone(),
+                    value: entry.value.clone(),
+                    ttl_secs,
+                })
+            })
+            .collect()
+    }
+
+    fn import_snapshot(&mut self, entries: &[SnapshotEntry]) {
+        self.map.clear();
+        let now = self.clock.now();
+        for entry in entries {
+            self.set(&entry.key, &entry.value);
+            if let Some(secs) = entry.ttl_secs {
+                let _ = self.expire_at(&entry.key, now + Duration::from_secs(secs));
+            }
+        }
     }
 }
 
@@ -261,5 +317,89 @@ mod tests {
         assert!(engine.expire_at(KEY, start + Duration::from_millis(1)));
         engine.clock_mut().advance(Duration::from_secs(1));
         assert!(!engine.delete(KEY));
+    }
+
+    #[test]
+    fn empty_export_import_roundtrip() {
+        let mut src = MemoryStorageEngine::new();
+        let entries = src.export_snapshot();
+        assert!(entries.is_empty());
+        let mut dst = MemoryStorageEngine::new();
+        dst.set(KEY, VALUE);
+        dst.import_snapshot(&entries);
+        assert_eq!(dst.get(KEY), None);
+    }
+
+    #[test]
+    fn set_export_import_get_hit() {
+        let mut src = MemoryStorageEngine::new();
+        src.set(KEY, VALUE);
+        let entries = src.export_snapshot();
+        let mut dst = MemoryStorageEngine::new();
+        dst.import_snapshot(&entries);
+        assert_eq!(dst.get(KEY), Some(VALUE));
+        assert_eq!(dst.ttl(KEY), Ttl::NoExpiry);
+    }
+
+    #[test]
+    fn export_import_preserves_remaining_ttl() {
+        let mut src = MemoryStorageEngine::with_clock(FakeClock::new());
+        let start = src.clock_mut().instant();
+        src.set(KEY, VALUE);
+        assert!(src.expire_at(KEY, start + Duration::from_secs(10)));
+        let entries = src.export_snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ttl_secs, Some(10));
+
+        let mut dst = MemoryStorageEngine::with_clock(FakeClock::new());
+        // Align clocks so remaining matches encoded secs.
+        dst.clock_mut().set(start);
+        dst.import_snapshot(&entries);
+        assert_eq!(dst.get(KEY), Some(VALUE));
+        match dst.ttl(KEY) {
+            Ttl::Remaining(d) => assert_eq!(d, Duration::from_secs(10)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expired_key_not_in_export() {
+        let mut engine = MemoryStorageEngine::with_clock(FakeClock::new());
+        let start = engine.clock_mut().instant();
+        engine.set(KEY, VALUE);
+        assert!(engine.expire_at(KEY, start + Duration::from_secs(1)));
+        engine.clock_mut().advance(Duration::from_secs(2));
+        let entries = engine.export_snapshot();
+        assert!(entries.is_empty());
+        assert_eq!(engine.get(KEY), None);
+    }
+
+    #[test]
+    fn import_replaces_previous_state() {
+        let mut engine = MemoryStorageEngine::new();
+        engine.set(b"old", b"1");
+        engine.set(KEY, VALUE);
+        let entries = vec![crate::storage::SnapshotEntry {
+            key: KEY.to_vec(),
+            value: VALUE2.to_vec(),
+            ttl_secs: None,
+        }];
+        engine.import_snapshot(&entries);
+        assert_eq!(engine.get(b"old"), None);
+        assert_eq!(engine.get(KEY), Some(VALUE2));
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_via_export() {
+        use crate::storage::snapshot::{decode, encode};
+
+        let mut src = MemoryStorageEngine::new();
+        src.set(b"", b"");
+        src.set(KEY, VALUE);
+        let bytes = encode(&src.export_snapshot());
+        let mut dst = MemoryStorageEngine::new();
+        dst.import_snapshot(&decode(&bytes).unwrap());
+        assert_eq!(dst.get(b""), Some(b"".as_slice()));
+        assert_eq!(dst.get(KEY), Some(VALUE));
     }
 }

@@ -10,8 +10,9 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 ## Overview
 
 - Layered design: transport, protocol, serializer, kernel, storage
-- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL`)
+- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE`)
 - Storage behind a trait so engines can be swapped later
+- Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 
 This project does **not**:
 
@@ -21,7 +22,7 @@ This project does **not**:
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` over an in-memory store (lazy key expiry). Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file). Default bind `0.0.0.0:6380`.
 
 ## Install / build
 
@@ -43,6 +44,11 @@ cargo run --release
 cargo run --release -- --bind 127.0.0.1:6380
 # or
 JANUS_BIND=127.0.0.1:6380 cargo run --release
+
+# optional snapshot path (SAVE writes here; process loads it on boot)
+cargo run --release -- --dbfile /tmp/janus.snap
+# or
+JANUS_DBFILE=/tmp/janus.snap cargo run --release
 ```
 
 Quick check with any RESP client (optional), for example:
@@ -51,10 +57,13 @@ Quick check with any RESP client (optional), for example:
 printf '*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n' | nc 127.0.0.1 6380
 printf '*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n10\r\n' | nc 127.0.0.1 6380
 printf '*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
+printf '*1\r\n$4\r\nSAVE\r\n' | nc 127.0.0.1 6380
 printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 ```
 
-Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL).
+Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
+
+Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL and SAVE/restore).
 
 ## Docker
 

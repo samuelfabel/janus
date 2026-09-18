@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - In-memory snapshot codec (`JANUSNAP`) with `export_snapshot` / `import_snapshot` (TTL as remaining seconds)
 - Kernel `Save` with file snapshot store (`--dbfile` / `JANUS_DBFILE`), boot load, and `Response::Error`
 - RESP decode for `SAVE` (arity 1, case-insensitive)
+- TCP e2e for `SAVE` / restore via boot load and README `--dbfile` surface
 - Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests

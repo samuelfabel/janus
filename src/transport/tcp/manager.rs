@@ -28,7 +28,15 @@ pub fn listen(bind: &str, dbfile: Option<PathBuf>) -> io::Result<()> {
 
 /// Accept connections from an already-bound listener (empty in-memory store).
 pub fn accept_loop(listener: TcpListener) -> io::Result<()> {
-    let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+    accept_loop_with_dbfile(listener, None)
+}
+
+/// Accept connections with an optional snapshot path (boot load + SAVE).
+pub fn accept_loop_with_dbfile(
+    listener: TcpListener,
+    dbfile: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile)?));
     accept_loop_with_kernel(listener, kernel)
 }
 

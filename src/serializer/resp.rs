@@ -1,4 +1,4 @@
-//! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL.
+//! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE.
 
 use crate::{
     command::types::Command,
@@ -208,6 +208,17 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"SAVE" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "SAVE arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Save,
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -282,6 +293,7 @@ mod tests {
     const DEL_FIXTURE: &[u8] = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
     const EXPIRE_FIXTURE: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n10\r\n";
     const TTL_FIXTURE: &[u8] = b"*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n";
+    const SAVE_FIXTURE: &[u8] = b"*1\r\n$4\r\nSAVE\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -390,6 +402,46 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_save_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(SAVE_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Save,
+                consumed,
+            } => assert_eq!(consumed, SAVE_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        let lower = b"*1\r\n$4\r\nsave\r\n";
+        assert!(matches!(
+            s.decode_one(lower),
+            DecodeOutcome::Ok {
+                command: Command::Save,
+                ..
+            }
+        ));
+        let mixed = b"*1\r\n$4\r\nSave\r\n";
+        assert!(matches!(
+            s.decode_one(mixed),
+            DecodeOutcome::Ok {
+                command: Command::Save,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn save_wrong_arity_is_invalid() {
+        let s = RespSerializer;
+        let arity = b"*2\r\n$4\r\nSAVE\r\n$3\r\nkey\r\n";
+        assert!(matches!(
+            s.decode_one(arity),
+            DecodeOutcome::Invalid {
+                message: "SAVE arity"
+            }
+        ));
     }
 
     #[test]

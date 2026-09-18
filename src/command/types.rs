@@ -16,4 +16,6 @@ pub enum Command<'a> {
     Expire { key: &'a [u8], seconds: u64 },
     /// Query remaining TTL for `key`.
     Ttl { key: &'a [u8] },
+    /// Synchronously persist the current store to the configured dbfile.
+    Save,
 }

@@ -1,4 +1,6 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
+use std::sync::{Arc, Mutex};
+
 use crate::{
     kernel::kernel::Kernel,
     protocol::{Protocol, ProtocolError},
@@ -12,7 +14,7 @@ where
     E: StorageEngine + Send + 'static,
     S: Serializer,
 {
-    kernel: Kernel<E>,
+    kernel: Arc<Mutex<Kernel<E>>>,
     serializer: S,
 }
 
@@ -21,8 +23,16 @@ where
     E: StorageEngine + Send + 'static,
     S: Serializer,
 {
-    /// Create a new protocol instance.
+    /// Create a new protocol instance that wraps `kernel` in a shared mutex.
     pub fn new(kernel: Kernel<E>, serializer: S) -> Self {
+        RespProtocol {
+            kernel: Arc::new(Mutex::new(kernel)),
+            serializer,
+        }
+    }
+
+    /// Share an existing kernel across connections (process-wide storage / SAVE).
+    pub fn shared(kernel: Arc<Mutex<Kernel<E>>>, serializer: S) -> Self {
         RespProtocol { kernel, serializer }
     }
 }
@@ -50,7 +60,11 @@ where
             match self.serializer.decode_one(&buffer[offset..]) {
                 DecodeOutcome::Incomplete => return Ok(offset),
                 DecodeOutcome::Ok { command, consumed } => {
-                    let response = self.kernel.execute(&command);
+                    let response = self
+                        .kernel
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .execute(&command);
                     let encoded = self.serializer.encode(&response);
                     callback(&encoded);
                     offset += consumed;

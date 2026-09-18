@@ -6,18 +6,37 @@ use std::time::Duration;
 use crate::{
     command::types::Command,
     response::types::Response,
-    storage::engine::{StorageEngine, Ttl},
+    storage::{
+        engine::{StorageEngine, Ttl},
+        snapshot,
+        store::SnapshotStore,
+    },
 };
+
+const ERR_SAVE_FAILED: &str = "ERR save failed";
+const ERR_SAVE_DISABLED: &str = "ERR save disabled";
 
 /// Executes domain commands against a storage engine.
 pub struct Kernel<S: StorageEngine> {
     storage: S,
+    store: Option<Box<dyn SnapshotStore>>,
 }
 
 impl<S: StorageEngine> Kernel<S> {
-    /// Creates a kernel bound to `storage`.
+    /// Creates a kernel bound to `storage` with persistence disabled.
     pub fn new(storage: S) -> Self {
-        Kernel { storage }
+        Kernel {
+            storage,
+            store: None,
+        }
+    }
+
+    /// Creates a kernel with an injected snapshot store (`--dbfile`).
+    pub fn with_store(storage: S, store: Box<dyn SnapshotStore>) -> Self {
+        Kernel {
+            storage,
+            store: Some(store),
+        }
     }
 
     /// Mutable access to the bound storage (tests).
@@ -51,6 +70,19 @@ impl<S: StorageEngine> Kernel<S> {
                 };
                 Response::Integer(code)
             }
+            Command::Save => self.save(),
+        }
+    }
+
+    fn save(&mut self) -> Response {
+        let Some(store) = self.store.as_ref() else {
+            return Response::Error(ERR_SAVE_DISABLED.to_string());
+        };
+        let entries = self.storage.export_snapshot();
+        let bytes = snapshot::encode(&entries);
+        match store.save(&bytes) {
+            Ok(()) => Response::Empty,
+            Err(_) => Response::Error(ERR_SAVE_FAILED.to_string()),
         }
     }
 }
@@ -58,7 +90,14 @@ impl<S: StorageEngine> Kernel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{clock::FakeClock, memory::MemoryStorageEngine};
+    use std::path::PathBuf;
+
+    use crate::storage::{
+        clock::FakeClock,
+        memory::MemoryStorageEngine,
+        snapshot::decode,
+        store::{FileSnapshotStore, SnapshotStore, boot_load},
+    };
 
     const KEY: &[u8] = b"key";
     const VALUE: &[u8] = b"value1";
@@ -66,6 +105,19 @@ mod tests {
 
     fn kernel_with_fake_clock() -> Kernel<MemoryStorageEngine<FakeClock>> {
         Kernel::new(MemoryStorageEngine::with_clock(FakeClock::new()))
+    }
+
+    fn temp_dbfile(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "janus-f302-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
     }
 
     #[test]
@@ -226,5 +278,88 @@ mod tests {
             kernel.execute(&Command::Get { key: KEY }),
             Response::Value(None)
         );
+    }
+
+    #[test]
+    fn save_disabled_returns_error() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(
+            kernel.execute(&Command::Save),
+            Response::Error(ERR_SAVE_DISABLED.to_string())
+        );
+    }
+
+    #[test]
+    fn save_to_tempfile_ok_and_decodable() {
+        let path = temp_dbfile("ok.snap");
+        let store = FileSnapshotStore::new(&path);
+        let mut kernel =
+            Kernel::with_store(MemoryStorageEngine::new(), Box::new(store.clone()));
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(kernel.execute(&Command::Save), Response::Empty);
+
+        let bytes = store.load().unwrap().expect("file written");
+        assert!(!bytes.is_empty());
+        let entries = decode(&bytes).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, KEY);
+        assert_eq!(entries[0].value, VALUE);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_impossible_path_returns_error() {
+        let path = PathBuf::from("/no/such/dir/janus-f302-save.snap");
+        let mut kernel = Kernel::with_store(
+            MemoryStorageEngine::new(),
+            Box::new(FileSnapshotStore::new(path)),
+        );
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(
+            kernel.execute(&Command::Save),
+            Response::Error(ERR_SAVE_FAILED.to_string())
+        );
+    }
+
+    #[test]
+    fn set_save_load_into_new_engine_get_hit() {
+        let path = temp_dbfile("roundtrip.snap");
+        let store = FileSnapshotStore::new(&path);
+        let mut kernel =
+            Kernel::with_store(MemoryStorageEngine::new(), Box::new(store.clone()));
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(kernel.execute(&Command::Save), Response::Empty);
+
+        let mut engine = MemoryStorageEngine::new();
+        boot_load(&mut engine, &store).unwrap();
+        let mut restored = Kernel::new(engine);
+        assert_eq!(
+            restored.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn boot_without_file_leaves_engine_empty() {
+        let path = temp_dbfile("missing.snap");
+        let _ = std::fs::remove_file(&path);
+        let store = FileSnapshotStore::new(&path);
+        let mut engine = MemoryStorageEngine::new();
+        boot_load(&mut engine, &store).unwrap();
+        assert_eq!(engine.get(KEY), None);
     }
 }

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Kernel `Expire` / `Ttl` commands and `Response::Integer` (Redis-style -2/-1/seconds)
 - RESP decode for `EXPIRE` / `TTL` fixtures; encode `Response::Integer`
 - TCP e2e for `EXPIRE` / `TTL` (before/after deadline) and README command surface
+- In-memory snapshot codec (`JANUSNAP`) with `export_snapshot` / `import_snapshot` (TTL as remaining seconds)
 - Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests

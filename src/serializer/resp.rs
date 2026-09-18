@@ -25,6 +25,13 @@ impl Serializer for RespSerializer {
                 buffer.extend_from_slice(b"\r\n");
                 buffer
             }
+            Response::Error(message) => {
+                let mut buffer = Vec::with_capacity(1 + message.len() + 2);
+                buffer.push(b'-');
+                buffer.extend_from_slice(message.as_bytes());
+                buffer.extend_from_slice(b"\r\n");
+                buffer
+            }
             Response::Value(Some(payload)) => {
                 let digits = count_digits(payload.len());
                 let mut buffer = Vec::with_capacity(1 + digits + 2 + payload.len() + 2);
@@ -332,6 +339,10 @@ mod tests {
         assert_eq!(s.encode(&Response::Integer(1)), b":1\r\n");
         assert_eq!(s.encode(&Response::Integer(-1)), b":-1\r\n");
         assert_eq!(s.encode(&Response::Integer(-2)), b":-2\r\n");
+        assert_eq!(
+            s.encode(&Response::Error("ERR save failed".into())),
+            b"-ERR save failed\r\n"
+        );
         assert_eq!(
             s.encode(&Response::Value(Some(b"value".to_vec()))),
             b"$5\r\nvalue\r\n"

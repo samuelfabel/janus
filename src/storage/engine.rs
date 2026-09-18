@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use super::snapshot::SnapshotEntry;
+
 /// Result of querying remaining time-to-live for a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ttl {
@@ -42,4 +44,10 @@ pub trait StorageEngine: Send {
 
     /// Current time from the engine's clock (for absolute deadlines).
     fn now(&self) -> Instant;
+
+    /// Lazy-purges expired keys, then returns all live entries with remaining TTL in seconds.
+    fn export_snapshot(&mut self) -> Vec<SnapshotEntry>;
+
+    /// Replaces all storage state with `entries` (clear, then set + optional expire).
+    fn import_snapshot(&mut self, entries: &[SnapshotEntry]);
 }

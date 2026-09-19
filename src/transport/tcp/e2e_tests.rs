@@ -18,7 +18,10 @@ fn start_server_with_dbfile(dbfile: Option<PathBuf>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
     thread::spawn(move || {
-        let _ = manager::accept_loop_with_dbfile(listener, dbfile);
+        let _ = match dbfile {
+            None => manager::accept_loop(listener),
+            Some(path) => manager::accept_loop_with_dbfile(listener, Some(path)),
+        };
     });
     // Brief yield so accept is ready
     thread::sleep(Duration::from_millis(20));

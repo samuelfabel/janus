@@ -14,14 +14,22 @@ use crate::{
     storage::{
         memory::MemoryStorageEngine,
         store::{FileSnapshotStore, boot_load},
+        wal::boot_wal,
     },
     transport::tcp::instance::TcpInstance,
 };
 
 /// Bind and accept forever (one thread per connection, std::net).
-pub fn listen(bind: &str, dbfile: Option<PathBuf>) -> io::Result<()> {
+///
+/// `dbfile` and `wal` are mutually exclusive (checked by CLI). Corrupt WAL
+/// fails startup with an I/O error.
+pub fn listen(
+    bind: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
     let listener = TcpListener::bind(bind)?;
-    let kernel = Arc::new(Mutex::new(build_kernel(dbfile)?));
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
     eprintln!("janus: listening on {bind}");
     accept_loop_with_kernel(listener, kernel)
 }
@@ -36,7 +44,7 @@ pub fn accept_loop_with_dbfile(
     listener: TcpListener,
     dbfile: Option<PathBuf>,
 ) -> io::Result<()> {
-    let kernel = Arc::new(Mutex::new(build_kernel(dbfile)?));
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, None)?));
     accept_loop_with_kernel(listener, kernel)
 }
 
@@ -53,15 +61,27 @@ fn accept_loop_with_kernel(
     Ok(())
 }
 
-fn build_kernel(dbfile: Option<PathBuf>) -> io::Result<Kernel<MemoryStorageEngine>> {
+fn build_kernel(
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<Kernel<MemoryStorageEngine>> {
     let mut engine = MemoryStorageEngine::new();
-    match dbfile {
-        Some(path) => {
+    match (dbfile, wal) {
+        (Some(_), Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ERR conflicting persistence",
+        )),
+        (None, Some(path)) => {
+            let writer = boot_wal(&path, &mut engine)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+            Ok(Kernel::with_wal(engine, writer))
+        }
+        (Some(path), None) => {
             let store = FileSnapshotStore::new(path);
             boot_load(&mut engine, &store)?;
             Ok(Kernel::with_store(engine, Box::new(store)))
         }
-        None => Ok(Kernel::new(engine)),
+        (None, None) => Ok(Kernel::new(engine)),
     }
 }
 

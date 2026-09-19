@@ -28,6 +28,16 @@ fn start_server_with_dbfile(dbfile: Option<PathBuf>) -> String {
     addr
 }
 
+fn start_server_with_wal(wal: Option<PathBuf>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local_addr").to_string();
+    thread::spawn(move || {
+        let _ = manager::accept_loop_with_wal(listener, wal);
+    });
+    thread::sleep(Duration::from_millis(20));
+    addr
+}
+
 fn temp_dbfile(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -36,6 +46,21 @@ fn temp_dbfile(label: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "janus-f304-e2e-{}-{}-{label}.snap",
+        std::process::id(),
+        nanos
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn temp_wal(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "janus-f403-e2e-{}-{}-{label}.wal",
         std::process::id(),
         nanos
     ));
@@ -99,6 +124,7 @@ const EXPIRE_KEY_2: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n2\r\n";
 const EXPIRE_KEY_1: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n1\r\n";
 const EXPIRE_KEY_30: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n30\r\n";
 const TTL_KEY: &[u8] = b"*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n";
+const DEL_KEY: &[u8] = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
 const SAVE: &[u8] = b"*1\r\n$4\r\nSAVE\r\n";
 
 /// A2 / V1-SCOPE: SET + GET on the same connection.
@@ -290,4 +316,72 @@ fn e2e_save_restore_preserves_ttl() {
     assert!(ttl > 0, "ttl={ttl}");
 
     let _ = std::fs::remove_file(&dbfile);
+}
+
+/// V4-SCOPE: SET (no SAVE) → second server boots same wal → GET hit.
+/// Strategy: two accept loops on different ports, shared tempfile (first may stay alive).
+#[test]
+fn e2e_wal_recovery_get() {
+    let wal = temp_wal("value");
+    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let mut client = connect(&addr1);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+    drop(client);
+
+    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let mut restored = connect(&addr2);
+    restored.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
+
+    let _ = std::fs::remove_file(&wal);
+}
+
+/// V4-SCOPE: SET → EXPIRE → recovery → GET + TTL > 0.
+#[test]
+fn e2e_wal_recovery_preserves_ttl() {
+    let wal = temp_wal("ttl");
+    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let mut client = connect(&addr1);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(EXPIRE_KEY_30).unwrap();
+    assert_eq!(read_exact(&mut client, 4), b":1\r\n");
+    drop(client);
+
+    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let mut restored = connect(&addr2);
+    restored.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
+
+    restored.write_all(TTL_KEY).unwrap();
+    let ttl = parse_resp_integer(&read_crlf_line(&mut restored));
+    assert!(ttl > 0, "ttl={ttl}");
+
+    let _ = std::fs::remove_file(&wal);
+}
+
+/// V4-SCOPE: SET → DEL → recovery → GET miss.
+#[test]
+fn e2e_wal_recovery_delete() {
+    let wal = temp_wal("delete");
+    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let mut client = connect(&addr1);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(DEL_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 4), b":1\r\n");
+    drop(client);
+
+    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let mut restored = connect(&addr2);
+    restored.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut restored, 5), b"$-1\r\n");
+
+    let _ = std::fs::remove_file(&wal);
 }

@@ -48,6 +48,12 @@ pub fn accept_loop_with_dbfile(
     accept_loop_with_kernel(listener, kernel)
 }
 
+/// Accept connections with an optional WAL path (boot replay + append).
+pub fn accept_loop_with_wal(listener: TcpListener, wal: Option<PathBuf>) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(None, wal)?));
+    accept_loop_with_kernel(listener, kernel)
+}
+
 fn accept_loop_with_kernel(
     listener: TcpListener,
     kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,

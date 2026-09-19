@@ -13,6 +13,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE`)
 - Storage behind a trait so engines can be swapped later
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
+- Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 
 This project does **not**:
 
@@ -22,7 +23,7 @@ This project does **not**:
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file). Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file or WAL). Default bind `0.0.0.0:6380`.
 
 ## Install / build
 
@@ -49,6 +50,11 @@ JANUS_BIND=127.0.0.1:6380 cargo run --release
 cargo run --release -- --dbfile /tmp/janus.snap
 # or
 JANUS_DBFILE=/tmp/janus.snap cargo run --release
+
+# optional WAL path (mutations append here; process replays on boot)
+cargo run --release -- --wal /tmp/janus.wal
+# or
+JANUS_WAL=/tmp/janus.wal cargo run --release
 ```
 
 Quick check with any RESP client (optional), for example:
@@ -62,8 +68,9 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 ```
 
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
+`--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL and SAVE/restore).
+Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, and WAL recovery).
 
 ## Docker
 

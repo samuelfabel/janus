@@ -10,16 +10,24 @@ use crate::{
         engine::{StorageEngine, Ttl},
         snapshot,
         store::SnapshotStore,
+        wal::{WalRecord, WalWriter, unix_now_secs},
     },
 };
 
 const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
+const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
 
 /// Executes domain commands against a storage engine.
+///
+/// When a WAL is configured, successful `Set` / `Delete` / `Expire` mutations
+/// are applied to storage first, then appended. If the append fails, the
+/// storage mutation is **not** rolled back and the client receives
+/// [`ERR_WAL_APPEND_FAILED`](ERR_WAL_APPEND_FAILED).
 pub struct Kernel<S: StorageEngine> {
     storage: S,
     store: Option<Box<dyn SnapshotStore>>,
+    wal: Option<WalWriter>,
 }
 
 impl<S: StorageEngine> Kernel<S> {
@@ -28,6 +36,7 @@ impl<S: StorageEngine> Kernel<S> {
         Kernel {
             storage,
             store: None,
+            wal: None,
         }
     }
 
@@ -36,6 +45,16 @@ impl<S: StorageEngine> Kernel<S> {
         Kernel {
             storage,
             store: Some(store),
+            wal: None,
+        }
+    }
+
+    /// Creates a kernel with an append-only WAL (`--wal`).
+    pub fn with_wal(storage: S, wal: WalWriter) -> Self {
+        Kernel {
+            storage,
+            store: None,
+            wal: Some(wal),
         }
     }
 
@@ -50,17 +69,44 @@ impl<S: StorageEngine> Kernel<S> {
         match command {
             Command::Set { key, value } => {
                 self.storage.set(key, value);
+                if let Err(()) = self.append_wal(&WalRecord::Set {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                }) {
+                    return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
+                }
                 Response::Empty
             }
             Command::Get { key } => {
                 Response::Value(self.storage.get(key).map(|v| v.to_vec()))
             }
-            Command::Delete { key } => Response::Deleted(self.storage.delete(key)),
+            Command::Delete { key } => {
+                let deleted = self.storage.delete(key);
+                if deleted {
+                    if let Err(()) = self.append_wal(&WalRecord::Delete {
+                        key: key.to_vec(),
+                    }) {
+                        return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
+                    }
+                }
+                Response::Deleted(deleted)
+            }
             Command::Expire { key, seconds } => {
                 // seconds == 0 → deadline == now → expires on next access (deadline <= now).
                 let deadline = self.storage.now() + Duration::from_secs(*seconds);
                 let ok = self.storage.expire_at(key, deadline);
-                Response::Integer(if ok { 1 } else { 0 })
+                if ok {
+                    let deadline_unix_secs = unix_now_secs().saturating_add(*seconds);
+                    if let Err(()) = self.append_wal(&WalRecord::Expire {
+                        key: key.to_vec(),
+                        deadline_unix_secs,
+                    }) {
+                        return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
+                    }
+                    Response::Integer(1)
+                } else {
+                    Response::Integer(0)
+                }
             }
             Command::Ttl { key } => {
                 let code = match self.storage.ttl(key) {
@@ -72,6 +118,13 @@ impl<S: StorageEngine> Kernel<S> {
             }
             Command::Save => self.save(),
         }
+    }
+
+    fn append_wal(&mut self, record: &WalRecord) -> Result<(), ()> {
+        let Some(wal) = self.wal.as_mut() else {
+            return Ok(());
+        };
+        wal.append(record).map_err(|_| ())
     }
 
     fn save(&mut self) -> Response {
@@ -94,9 +147,11 @@ mod tests {
 
     use crate::storage::{
         clock::FakeClock,
+        engine::Ttl,
         memory::MemoryStorageEngine,
         snapshot::decode,
         store::{FileSnapshotStore, SnapshotStore, boot_load},
+        wal::{WalWriter, boot_wal, replay as replay_wal},
     };
 
     const KEY: &[u8] = b"key";
@@ -117,6 +172,20 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        path
+    }
+
+    fn temp_wal(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "janus-f402-{}-{}-{label}.wal",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
         path
     }
 
@@ -361,5 +430,132 @@ mod tests {
         let mut engine = MemoryStorageEngine::new();
         boot_load(&mut engine, &store).unwrap();
         assert_eq!(engine.get(KEY), None);
+    }
+
+    #[test]
+    fn set_expire_with_wal_grows_file_and_replay_get_ttl() {
+        let path = temp_wal("set-expire");
+        let writer = WalWriter::create(&path).unwrap();
+        let header_len = std::fs::metadata(&path).unwrap().len();
+        let mut kernel = Kernel::with_wal(MemoryStorageEngine::new(), writer);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Expire {
+                key: KEY,
+                seconds: 60
+            }),
+            Response::Integer(1)
+        );
+        drop(kernel);
+        assert!(std::fs::metadata(&path).unwrap().len() > header_len);
+
+        let mut engine = MemoryStorageEngine::new();
+        replay_wal(&path, &mut engine).unwrap();
+        assert_eq!(engine.get(KEY), Some(VALUE));
+        match engine.ttl(KEY) {
+            Ttl::Remaining(d) => assert!((1..=60).contains(&d.as_secs())),
+            other => panic!("unexpected ttl {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_with_wal_replay_miss() {
+        let path = temp_wal("delete");
+        let writer = WalWriter::create(&path).unwrap();
+        let mut kernel = Kernel::with_wal(MemoryStorageEngine::new(), writer);
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(
+            kernel.execute(&Command::Delete { key: KEY }),
+            Response::Deleted(true)
+        );
+        drop(kernel);
+
+        let mut engine = MemoryStorageEngine::new();
+        replay_wal(&path, &mut engine).unwrap();
+        assert_eq!(engine.get(KEY), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn boot_wal_missing_file_leaves_engine_empty() {
+        let path = temp_wal("boot-missing");
+        assert!(!path.exists());
+        let mut engine = MemoryStorageEngine::new();
+        let _writer = boot_wal(&path, &mut engine).unwrap();
+        assert_eq!(engine.get(KEY), None);
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn without_wal_set_does_not_create_wal_file() {
+        let path = temp_wal("no-wal");
+        assert!(!path.exists());
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        kernel.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn expire_miss_does_not_append_wal() {
+        let path = temp_wal("expire-miss");
+        let writer = WalWriter::create(&path).unwrap();
+        let header_len = std::fs::metadata(&path).unwrap().len();
+        let mut kernel = Kernel::with_wal(MemoryStorageEngine::new(), writer);
+        assert_eq!(
+            kernel.execute(&Command::Expire {
+                key: KEY,
+                seconds: 10
+            }),
+            Response::Integer(0)
+        );
+        drop(kernel);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), header_len);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_miss_does_not_append_wal() {
+        let path = temp_wal("delete-miss");
+        let writer = WalWriter::create(&path).unwrap();
+        let header_len = std::fs::metadata(&path).unwrap().len();
+        let mut kernel = Kernel::with_wal(MemoryStorageEngine::new(), writer);
+        assert_eq!(
+            kernel.execute(&Command::Delete { key: KEY }),
+            Response::Deleted(false)
+        );
+        drop(kernel);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), header_len);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn boot_wal_replays_existing_file() {
+        let path = temp_wal("boot-replay");
+        {
+            let writer = WalWriter::create(&path).unwrap();
+            let mut kernel = Kernel::with_wal(MemoryStorageEngine::new(), writer);
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            });
+        }
+        let mut engine = MemoryStorageEngine::new();
+        let _writer = boot_wal(&path, &mut engine).unwrap();
+        assert_eq!(engine.get(KEY), Some(VALUE));
+        let _ = std::fs::remove_file(&path);
     }
 }

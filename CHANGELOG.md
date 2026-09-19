@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - RESP decode for `SAVE` (arity 1, case-insensitive)
 - TCP e2e for `SAVE` / restore via boot load and README `--dbfile` surface
 - Append-only `JANUSWAL` codec with `WalWriter` (fsync per record) and replay into `StorageEngine`
+- Kernel WAL append after successful Set/Delete/Expire, `--wal` / `JANUS_WAL` boot replay, and conflict with `--dbfile`
 - Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests

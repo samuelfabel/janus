@@ -119,6 +119,23 @@ pub fn replay(path: impl AsRef<Path>, engine: &mut impl StorageEngine) -> Result
     Ok(())
 }
 
+/// Boot helper: replay an existing WAL into `engine`, then open for append.
+///
+/// Missing file → create empty WAL (engine unchanged). Corrupt / unreadable
+/// WAL → `Err` (hard-fail startup).
+pub fn boot_wal(
+    path: impl AsRef<Path>,
+    engine: &mut impl StorageEngine,
+) -> Result<WalWriter, WalError> {
+    let path = path.as_ref();
+    if path.exists() {
+        replay(path, engine)?;
+        WalWriter::open_append(path)
+    } else {
+        WalWriter::create(path).map_err(WalError::from)
+    }
+}
+
 fn validate_header(file: &mut File) -> Result<(), WalError> {
     let mut magic = [0u8; 8];
     file.read_exact(&mut magic)?;

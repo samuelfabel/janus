@@ -2,13 +2,17 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    kernel::kernel::Kernel,
+    kernel::kernel::{Kernel, lock_kernel},
     protocol::{Protocol, ProtocolError},
     serializer::{DecodeOutcome, Serializer},
     storage::engine::StorageEngine,
 };
 
-/// RESP protocol instance owning a kernel and serializer (v1: one per connection).
+/// RESP protocol instance bound to a kernel and serializer.
+///
+/// Multi-connection servers use [`RespProtocol::shared`] with one
+/// process-wide `Arc<Mutex<Kernel<_>>>`. [`RespProtocol::new`] wraps a
+/// private mutex for single-connection / unit fixtures.
 pub struct RespProtocol<E, S>
 where
     E: StorageEngine + Send + 'static,
@@ -23,7 +27,7 @@ where
     E: StorageEngine + Send + 'static,
     S: Serializer,
 {
-    /// Create a new protocol instance that wraps `kernel` in a shared mutex.
+    /// Wrap `kernel` in a private mutex (single-connection / tests).
     pub fn new(kernel: Kernel<E>, serializer: S) -> Self {
         RespProtocol {
             kernel: Arc::new(Mutex::new(kernel)),
@@ -31,7 +35,7 @@ where
         }
     }
 
-    /// Share an existing kernel across connections (process-wide storage / SAVE).
+    /// Canonical multi-connection path: share one process-wide kernel mutex.
     pub fn shared(kernel: Arc<Mutex<Kernel<E>>>, serializer: S) -> Self {
         RespProtocol { kernel, serializer }
     }
@@ -54,17 +58,19 @@ where
         //     Incomplete → return Ok(offset)
         //     Err(e)     → return Err(e)
         //     Ok(cmd, n) → kernel; encode; callback; offset += n
+        //
+        // Concurrency (V5): decode and encode stay outside the kernel mutex;
+        // lock only for Kernel::execute (poison → into_inner via lock_kernel).
         let mut offset = 0usize;
 
         while offset < buffer.len() {
             match self.serializer.decode_one(&buffer[offset..]) {
                 DecodeOutcome::Incomplete => return Ok(offset),
                 DecodeOutcome::Ok { command, consumed } => {
-                    let response = self
-                        .kernel
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .execute(&command);
+                    let response = {
+                        let mut kernel = lock_kernel(&self.kernel);
+                        kernel.execute(&command)
+                    };
                     let encoded = self.serializer.encode(&response);
                     callback(&encoded);
                     offset += consumed;
@@ -85,7 +91,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{serializer::resp::RespSerializer, storage::memory::MemoryStorageEngine};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+
+    use crate::{
+        kernel::kernel::Kernel, serializer::resp::RespSerializer,
+        storage::memory::MemoryStorageEngine,
+    };
 
     fn protocol() -> RespProtocol<MemoryStorageEngine, RespSerializer> {
         RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer)
@@ -263,5 +275,72 @@ mod tests {
         let mut p = protocol();
         let err = p.execute(b"+OK\r\n", |_| {}).unwrap_err();
         assert!(matches!(err, ProtocolError::Invalid { .. }));
+    }
+
+    #[test]
+    fn shared_kernel_two_threads_set_then_get() {
+        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let set_kernel = Arc::clone(&kernel);
+        let set_barrier = Arc::clone(&barrier);
+        let setter = thread::spawn(move || {
+            let mut p = RespProtocol::shared(set_kernel, RespSerializer);
+            let mut responses = Vec::new();
+            p.execute(SET_KEY_VALUE, |out| responses.push(out.to_vec()))
+                .unwrap();
+            assert_eq!(responses, vec![b"+OK\r\n".to_vec()]);
+            set_barrier.wait();
+        });
+
+        let get_kernel = Arc::clone(&kernel);
+        let get_barrier = Arc::clone(&barrier);
+        let getter = thread::spawn(move || {
+            get_barrier.wait();
+            let mut p = RespProtocol::shared(get_kernel, RespSerializer);
+            let mut responses = Vec::new();
+            let get = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+            p.execute(get, |out| responses.push(out.to_vec())).unwrap();
+            assert_eq!(responses, vec![b"$5\r\nvalue\r\n".to_vec()]);
+        });
+
+        setter.join().expect("setter");
+        getter.join().expect("getter");
+    }
+
+    #[test]
+    fn shared_kernel_interleaved_frames_no_panic() {
+        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+        let mut handles = Vec::new();
+        for id in 0u8..4 {
+            let k = Arc::clone(&kernel);
+            handles.push(thread::spawn(move || {
+                let mut p = RespProtocol::shared(k, RespSerializer);
+                let key = [b'k', id];
+                let set = format!(
+                    "*3\r\n$3\r\nSET\r\n$2\r\n{}\r\n$1\r\n{}\r\n",
+                    std::str::from_utf8(&key).unwrap(),
+                    id
+                );
+                let get = format!(
+                    "*2\r\n$3\r\nGET\r\n$2\r\n{}\r\n",
+                    std::str::from_utf8(&key).unwrap()
+                );
+                for _ in 0..20 {
+                    let mut responses = Vec::new();
+                    p.execute(set.as_bytes(), |out| responses.push(out.to_vec()))
+                        .unwrap();
+                    assert_eq!(responses, vec![b"+OK\r\n".to_vec()]);
+                    responses.clear();
+                    p.execute(get.as_bytes(), |out| responses.push(out.to_vec()))
+                        .unwrap();
+                    let expected = format!("$1\r\n{}\r\n", id);
+                    assert_eq!(responses, vec![expected.as_bytes().to_vec()]);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker");
+        }
     }
 }

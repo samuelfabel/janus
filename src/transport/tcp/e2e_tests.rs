@@ -1,42 +1,42 @@
-//! TCP e2e harness (no redis-cli): bind ephemeral port, real accept/read/write.
+//! TCP e2e harness (no redis-cli): Tokio accept loop, real read/write.
 
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     path::PathBuf,
-    sync::Barrier,
-    sync::Arc,
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tokio::net::TcpListener;
+
 use super::manager;
 
-fn start_server() -> String {
-    start_server_with_dbfile(None)
+async fn start_server() -> String {
+    start_server_with_dbfile(None).await
 }
 
-fn start_server_with_dbfile(dbfile: Option<PathBuf>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+async fn start_server_with_dbfile(dbfile: Option<PathBuf>) -> String {
+    start_server_with_persistence(dbfile, None).await
+}
+
+async fn start_server_with_wal(wal: Option<PathBuf>) -> String {
+    start_server_with_persistence(None, wal).await
+}
+
+async fn start_server_with_persistence(
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
-    thread::spawn(move || {
-        let _ = match dbfile {
-            None => manager::accept_loop(listener),
-            Some(path) => manager::accept_loop_with_dbfile(listener, Some(path)),
-        };
+    tokio::spawn(async move {
+        let _ = manager::serve(listener, dbfile, wal).await;
     });
     // Brief yield so accept is ready
-    thread::sleep(Duration::from_millis(20));
-    addr
-}
-
-fn start_server_with_wal(wal: Option<PathBuf>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("local_addr").to_string();
-    thread::spawn(move || {
-        let _ = manager::accept_loop_with_wal(listener, wal);
-    });
-    thread::sleep(Duration::from_millis(20));
+    tokio::task::yield_now().await;
+    std::thread::sleep(Duration::from_millis(20));
     addr
 }
 
@@ -130,9 +130,9 @@ const DEL_KEY: &[u8] = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
 const SAVE: &[u8] = b"*1\r\n$4\r\nSAVE\r\n";
 
 /// A2 / V1-SCOPE: SET + GET on the same connection.
-#[test]
-fn e2e_set_then_get_same_connection() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_set_then_get_same_connection() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -143,9 +143,9 @@ fn e2e_set_then_get_same_connection() {
 }
 
 /// A3 / V1-SCOPE sequence: SET a, SET b, GET a, GET b, DEL a, GET a.
-#[test]
-fn e2e_set_get_delete_sequence() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_set_get_delete_sequence() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
 
     let set_a = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
@@ -174,9 +174,9 @@ fn e2e_set_get_delete_sequence() {
 }
 
 /// A4 — several RESP frames in one client write → all answered in order.
-#[test]
-fn e2e_multi_message_single_write() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_multi_message_single_write() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
 
     let set_a = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
@@ -198,9 +198,9 @@ fn e2e_multi_message_single_write() {
 }
 
 /// A5 — one RESP frame split across two client writes.
-#[test]
-fn e2e_fragmented_frame_two_writes() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fragmented_frame_two_writes() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
 
     let split = 12;
@@ -217,16 +217,16 @@ fn e2e_fragmented_frame_two_writes() {
 }
 
 /// A1 — process accepts a TCP connection (smoke).
-#[test]
-fn e2e_accepts_connection() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_accepts_connection() {
+    let addr = start_server().await;
     let _client = connect(&addr);
 }
 
 /// V2-SCOPE: SET → EXPIRE → TTL remaining → GET hit (before deadline).
-#[test]
-fn e2e_expire_ttl_then_get_before_deadline() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_expire_ttl_then_get_before_deadline() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -245,9 +245,9 @@ fn e2e_expire_ttl_then_get_before_deadline() {
 
 /// V2-SCOPE: after short TTL elapses, GET is null and TTL is -2.
 /// Uses wall-clock EXPIRE 1 + sleep (SystemClock on the server).
-#[test]
-fn e2e_get_and_ttl_after_expire() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_get_and_ttl_after_expire() {
+    let addr = start_server().await;
     let mut client = connect(&addr);
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -270,10 +270,10 @@ fn e2e_get_and_ttl_after_expire() {
 
 /// V3-SCOPE: SET → SAVE → second server boots same dbfile → GET hit.
 /// Strategy: two accept loops on different ports, shared tempfile (boot path).
-#[test]
-fn e2e_save_then_restore_get() {
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_save_then_restore_get() {
     let dbfile = temp_dbfile("value");
-    let addr1 = start_server_with_dbfile(Some(dbfile.clone()));
+    let addr1 = start_server_with_dbfile(Some(dbfile.clone())).await;
     let mut client = connect(&addr1);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -283,7 +283,7 @@ fn e2e_save_then_restore_get() {
     assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
     drop(client);
 
-    let addr2 = start_server_with_dbfile(Some(dbfile.clone()));
+    let addr2 = start_server_with_dbfile(Some(dbfile.clone())).await;
     let mut restored = connect(&addr2);
     restored.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
@@ -292,10 +292,10 @@ fn e2e_save_then_restore_get() {
 }
 
 /// V3-SCOPE: SET → EXPIRE → SAVE → restore → GET + TTL > 0.
-#[test]
-fn e2e_save_restore_preserves_ttl() {
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_save_restore_preserves_ttl() {
     let dbfile = temp_dbfile("ttl");
-    let addr1 = start_server_with_dbfile(Some(dbfile.clone()));
+    let addr1 = start_server_with_dbfile(Some(dbfile.clone())).await;
     let mut client = connect(&addr1);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -308,7 +308,7 @@ fn e2e_save_restore_preserves_ttl() {
     assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
     drop(client);
 
-    let addr2 = start_server_with_dbfile(Some(dbfile.clone()));
+    let addr2 = start_server_with_dbfile(Some(dbfile.clone())).await;
     let mut restored = connect(&addr2);
     restored.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
@@ -322,17 +322,17 @@ fn e2e_save_restore_preserves_ttl() {
 
 /// V4-SCOPE: SET (no SAVE) → second server boots same wal → GET hit.
 /// Strategy: two accept loops on different ports, shared tempfile (first may stay alive).
-#[test]
-fn e2e_wal_recovery_get() {
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_wal_recovery_get() {
     let wal = temp_wal("value");
-    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let addr1 = start_server_with_wal(Some(wal.clone())).await;
     let mut client = connect(&addr1);
 
     client.write_all(SET_KEY_VALUE).unwrap();
     assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
     drop(client);
 
-    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let addr2 = start_server_with_wal(Some(wal.clone())).await;
     let mut restored = connect(&addr2);
     restored.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
@@ -341,10 +341,10 @@ fn e2e_wal_recovery_get() {
 }
 
 /// V4-SCOPE: SET → EXPIRE → recovery → GET + TTL > 0.
-#[test]
-fn e2e_wal_recovery_preserves_ttl() {
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_wal_recovery_preserves_ttl() {
     let wal = temp_wal("ttl");
-    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let addr1 = start_server_with_wal(Some(wal.clone())).await;
     let mut client = connect(&addr1);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -354,7 +354,7 @@ fn e2e_wal_recovery_preserves_ttl() {
     assert_eq!(read_exact(&mut client, 4), b":1\r\n");
     drop(client);
 
-    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let addr2 = start_server_with_wal(Some(wal.clone())).await;
     let mut restored = connect(&addr2);
     restored.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut restored, 11), b"$5\r\nvalue\r\n");
@@ -367,10 +367,10 @@ fn e2e_wal_recovery_preserves_ttl() {
 }
 
 /// V4-SCOPE: SET → DEL → recovery → GET miss.
-#[test]
-fn e2e_wal_recovery_delete() {
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_wal_recovery_delete() {
     let wal = temp_wal("delete");
-    let addr1 = start_server_with_wal(Some(wal.clone()));
+    let addr1 = start_server_with_wal(Some(wal.clone())).await;
     let mut client = connect(&addr1);
 
     client.write_all(SET_KEY_VALUE).unwrap();
@@ -380,7 +380,7 @@ fn e2e_wal_recovery_delete() {
     assert_eq!(read_exact(&mut client, 4), b":1\r\n");
     drop(client);
 
-    let addr2 = start_server_with_wal(Some(wal.clone()));
+    let addr2 = start_server_with_wal(Some(wal.clone())).await;
     let mut restored = connect(&addr2);
     restored.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut restored, 5), b"$-1\r\n");
@@ -389,9 +389,9 @@ fn e2e_wal_recovery_delete() {
 }
 
 /// V5-SCOPE: client A SET → client B GET on the same server → hit.
-#[test]
-fn e2e_two_clients_set_get_shared_store() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_two_clients_set_get_shared_store() {
+    let addr = start_server().await;
     let barrier = Arc::new(Barrier::new(2));
 
     let addr_a = addr.clone();
@@ -417,9 +417,9 @@ fn e2e_two_clients_set_get_shared_store() {
 }
 
 /// V5-SCOPE: two clients interleave SET/GET on distinct keys.
-#[test]
-fn e2e_two_clients_interleaved_distinct_keys() {
-    let addr = start_server();
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_two_clients_interleaved_distinct_keys() {
+    let addr = start_server().await;
     let mut handles = Vec::new();
     for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
         let addr = addr.clone();

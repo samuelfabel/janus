@@ -14,7 +14,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Storage behind a trait so engines can be swapped later
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
-- Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`, thread per connection)
+- Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
 
 This project does **not**:
 
@@ -24,11 +24,11 @@ This project does **not**:
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file or WAL). Each accepted connection runs on its own thread; all connections share one Kernel under a `Mutex`. Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. Default bind `0.0.0.0:6380`.
 
 ## Install / build
 
-Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021).
+Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021). Tokio is pulled in via `Cargo.toml` for the async TCP edge.
 
 ```bash
 git clone https://github.com/samuelfabel/janus.git
@@ -71,11 +71,11 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test` (TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, and multi-client shared-store concurrency).
+Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, and multi-client shared-store concurrency).
 
 ## Docker
 
-Multi-stage image (Rust builder → Debian slim runtime, non-root user).
+Multi-stage image (Rust builder → Debian slim runtime, non-root user). `cargo run` / the image entrypoint use the same Tokio server binary.
 
 Default listen address (when the server binary binds): `0.0.0.0:6380` via `JANUS_BIND` or `--bind` (avoids clashing with Redis on `6379`).
 

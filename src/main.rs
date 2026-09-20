@@ -20,13 +20,14 @@ struct Config {
     wal: Option<PathBuf>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let config = match resolve_config(env::args().skip(1).collect()) {
         Ok(cfg) => cfg,
         Err(code) => process::exit(code),
     };
 
-    if let Err(err) = manager::listen(&config.bind, config.dbfile, config.wal) {
+    if let Err(err) = manager::listen(&config.bind, config.dbfile, config.wal).await {
         eprintln!("janus: failed to listen on {}: {err}", config.bind);
         process::exit(1);
     }

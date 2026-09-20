@@ -4,6 +4,8 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
+    sync::Barrier,
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -384,4 +386,67 @@ fn e2e_wal_recovery_delete() {
     assert_eq!(read_exact(&mut restored, 5), b"$-1\r\n");
 
     let _ = std::fs::remove_file(&wal);
+}
+
+/// V5-SCOPE: client A SET → client B GET on the same server → hit.
+#[test]
+fn e2e_two_clients_set_get_shared_store() {
+    let addr = start_server();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let addr_a = addr.clone();
+    let barrier_a = Arc::clone(&barrier);
+    let a = thread::spawn(move || {
+        let mut client = connect(&addr_a);
+        client.write_all(SET_KEY_VALUE).unwrap();
+        assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+        barrier_a.wait();
+    });
+
+    let addr_b = addr.clone();
+    let barrier_b = Arc::clone(&barrier);
+    let b = thread::spawn(move || {
+        barrier_b.wait();
+        let mut client = connect(&addr_b);
+        client.write_all(GET_KEY).unwrap();
+        assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+    });
+
+    a.join().expect("client A");
+    b.join().expect("client B");
+}
+
+/// V5-SCOPE: two clients interleave SET/GET on distinct keys.
+#[test]
+fn e2e_two_clients_interleaved_distinct_keys() {
+    let addr = start_server();
+    let mut handles = Vec::new();
+    for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
+        let addr = addr.clone();
+        handles.push(thread::spawn(move || {
+            let set = format!(
+                "*3\r\n$3\r\nSET\r\n$1\r\n{}\r\n$1\r\n{}\r\n",
+                std::str::from_utf8(key).unwrap(),
+                std::str::from_utf8(value).unwrap()
+            );
+            let get = format!(
+                "*2\r\n$3\r\nGET\r\n$1\r\n{}\r\n",
+                std::str::from_utf8(key).unwrap()
+            );
+            let expected = format!("$1\r\n{}\r\n", std::str::from_utf8(value).unwrap());
+            let mut client = connect(&addr);
+            for _ in 0..25 {
+                client.write_all(set.as_bytes()).unwrap();
+                assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+                client.write_all(get.as_bytes()).unwrap();
+                assert_eq!(
+                    read_exact(&mut client, expected.len()),
+                    expected.as_bytes()
+                );
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("client");
+    }
 }

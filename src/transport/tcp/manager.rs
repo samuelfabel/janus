@@ -35,6 +35,16 @@ pub async fn listen(
     accept_loop_with_kernel(listener, kernel).await
 }
 
+/// Accept forever on an already-bound Tokio listener (e2e / tests).
+pub async fn serve(
+    listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    accept_loop_with_kernel(listener, kernel).await
+}
+
 async fn accept_loop_with_kernel(
     listener: TcpListener,
     kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,
@@ -79,53 +89,6 @@ fn spawn_connection(
     TcpInstance::spawn(stream, protocol);
 }
 
-/// E2e harness helpers: bridge a `std::net` listener into the Tokio accept loop.
-#[cfg(test)]
-mod harness {
-    use super::*;
-    use std::net::TcpListener as StdTcpListener;
-
-    /// Accept connections from an already-bound std listener (empty in-memory store).
-    pub fn accept_loop(listener: StdTcpListener) -> io::Result<()> {
-        accept_loop_with_dbfile(listener, None)
-    }
-
-    /// Accept connections with an optional snapshot path (boot load + SAVE).
-    pub fn accept_loop_with_dbfile(
-        listener: StdTcpListener,
-        dbfile: Option<PathBuf>,
-    ) -> io::Result<()> {
-        accept_loop_std(listener, dbfile, None)
-    }
-
-    /// Accept connections with an optional WAL path (boot replay + append).
-    pub fn accept_loop_with_wal(
-        listener: StdTcpListener,
-        wal: Option<PathBuf>,
-    ) -> io::Result<()> {
-        accept_loop_std(listener, None, wal)
-    }
-
-    fn accept_loop_std(
-        listener: StdTcpListener,
-        dbfile: Option<PathBuf>,
-        wal: Option<PathBuf>,
-    ) -> io::Result<()> {
-        listener.set_nonblocking(true)?;
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        rt.block_on(async {
-            let listener = TcpListener::from_std(listener)?;
-            let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
-            accept_loop_with_kernel(listener, kernel).await
-        })
-    }
-}
-
-#[cfg(test)]
-pub use harness::{accept_loop, accept_loop_with_dbfile, accept_loop_with_wal};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,10 +101,8 @@ mod tests {
     async fn listen_accepts_one_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
-        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
-
         tokio::spawn(async move {
-            let _ = accept_loop_with_kernel(listener, kernel).await;
+            let _ = serve(listener, None, None).await;
         });
 
         let mut client = TcpStream::connect(&addr).await.expect("connect");

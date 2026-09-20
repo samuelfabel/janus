@@ -1,6 +1,7 @@
 //! Kernel: map domain [`Command`](crate::command::types::Command) to
 //! [`Response`](crate::response::types::Response) via a [`StorageEngine`].
 
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::{
@@ -18,7 +19,24 @@ const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
 const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
 
+/// Lock a shared kernel, recovering from poison via [`PoisonError::into_inner`](std::sync::PoisonError::into_inner).
+///
+/// The domain [`Kernel`] is single-threaded. Process-wide sharing uses
+/// `Arc<Mutex<Kernel<_>>>`; each [`Kernel::execute`] runs under this lock and
+/// releases it before the next command on the same thread. A poisoned mutex is
+/// recovered so a panicked holder does not abort the pedagogical server.
+pub fn lock_kernel<S: StorageEngine>(
+    mutex: &Mutex<Kernel<S>>,
+) -> MutexGuard<'_, Kernel<S>> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Executes domain commands against a storage engine.
+///
+/// The kernel itself is single-threaded. Share across threads with
+/// `Arc<Mutex<Kernel<_>>>` and [`lock_kernel`].
 ///
 /// When a WAL is configured, successful `Set` / `Delete` / `Expire` mutations
 /// are applied to storage first, then appended. If the append fails, the
@@ -143,7 +161,11 @@ impl<S: StorageEngine> Kernel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
 
     use crate::storage::{
         clock::FakeClock,
@@ -557,5 +579,116 @@ mod tests {
         let _writer = boot_wal(&path, &mut engine).unwrap();
         assert_eq!(engine.get(KEY), Some(VALUE));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shared_arc_mutex_two_threads_set_get() {
+        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let setter_kernel = Arc::clone(&kernel);
+        let setter_barrier = Arc::clone(&barrier);
+        let setter = thread::spawn(move || {
+            {
+                let mut g = lock_kernel(&setter_kernel);
+                assert_eq!(
+                    g.execute(&Command::Set {
+                        key: KEY,
+                        value: VALUE,
+                    }),
+                    Response::Empty
+                );
+            }
+            setter_barrier.wait();
+        });
+
+        let getter_kernel = Arc::clone(&kernel);
+        let getter_barrier = Arc::clone(&barrier);
+        let getter = thread::spawn(move || {
+            getter_barrier.wait();
+            let mut g = lock_kernel(&getter_kernel);
+            assert_eq!(
+                g.execute(&Command::Get { key: KEY }),
+                Response::Value(Some(VALUE.to_vec()))
+            );
+        });
+
+        setter.join().expect("setter");
+        getter.join().expect("getter");
+    }
+
+    #[test]
+    fn shared_arc_mutex_interleaved_delete_get_miss() {
+        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+        let after_set = Arc::new(Barrier::new(2));
+        let after_delete = Arc::new(Barrier::new(2));
+
+        let writer_kernel = Arc::clone(&kernel);
+        let writer_after_set = Arc::clone(&after_set);
+        let writer_after_delete = Arc::clone(&after_delete);
+        let writer = thread::spawn(move || {
+            {
+                let mut g = lock_kernel(&writer_kernel);
+                g.execute(&Command::Set {
+                    key: KEY,
+                    value: VALUE,
+                });
+            }
+            writer_after_set.wait();
+            writer_after_delete.wait();
+            let mut g = lock_kernel(&writer_kernel);
+            assert_eq!(
+                g.execute(&Command::Get { key: KEY }),
+                Response::Value(None)
+            );
+        });
+
+        let deleter_kernel = Arc::clone(&kernel);
+        let deleter_after_set = Arc::clone(&after_set);
+        let deleter_after_delete = Arc::clone(&after_delete);
+        let deleter = thread::spawn(move || {
+            deleter_after_set.wait();
+            {
+                let mut g = lock_kernel(&deleter_kernel);
+                assert_eq!(
+                    g.execute(&Command::Delete { key: KEY }),
+                    Response::Deleted(true)
+                );
+            }
+            deleter_after_delete.wait();
+        });
+
+        writer.join().expect("writer");
+        deleter.join().expect("deleter");
+    }
+
+    #[test]
+    fn shared_arc_mutex_last_write_wins() {
+        let kernel = Arc::new(Mutex::new(Kernel::new(MemoryStorageEngine::new())));
+        let mut handles = Vec::new();
+        for id in 0u8..4 {
+            let k = Arc::clone(&kernel);
+            handles.push(thread::spawn(move || {
+                let value = [id];
+                for _ in 0..40 {
+                    let mut g = lock_kernel(&k);
+                    g.execute(&Command::Set {
+                        key: KEY,
+                        value: &value,
+                    });
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker");
+        }
+        let mut g = lock_kernel(&kernel);
+        match g.execute(&Command::Get { key: KEY }) {
+            Response::Value(Some(v)) => {
+                assert_eq!(v.len(), 1);
+                assert!((0u8..4).contains(&v[0]), "unexpected last write {v:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

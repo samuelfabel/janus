@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Kernel WAL append after successful Set/Delete/Expire, `--wal` / `JANUS_WAL` boot replay, and conflict with `--dbfile`
 - TCP e2e for WAL recovery (no SAVE) and README `--wal` / `JANUS_WAL` surface
 - Shared `Arc<Mutex<Kernel>>` via `lock_kernel` (poison → `into_inner`) with multi-thread Kernel tests
+- Protocol `RespProtocol::shared` uses `lock_kernel` (decode/encode outside the mutex) with multi-thread fixtures
 - Protocol Instance `execute` returns `Result<usize, ProtocolError>` with STREAM-PROCESSING S1–S7 tests
 - Kernel domain types: `Response::Deleted` and Command/Response docs; tests use `MemoryStorageEngine`
 - Clarified `StorageEngine` / `MemoryStorageEngine` contract and storage unit tests

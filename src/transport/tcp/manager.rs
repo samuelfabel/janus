@@ -2,10 +2,12 @@
 
 use std::{
     io,
-    net::{TcpListener, TcpStream},
+    net::TcpListener as StdTcpListener,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+
+use tokio::net::TcpListener;
 
 use crate::{
     kernel::kernel::Kernel,
@@ -19,52 +21,79 @@ use crate::{
     transport::tcp::instance::TcpInstance,
 };
 
-/// Bind and accept forever (one thread per connection, std::net).
+/// Bind and accept forever (Tokio tasks per connection).
 ///
-/// `dbfile` and `wal` are mutually exclusive (checked by CLI). Corrupt WAL
-/// fails startup with an I/O error.
+/// Bridge until F6-02 owns `#[tokio::main]`: builds a multi-thread runtime and
+/// `block_on`s the async accept loop. `dbfile` and `wal` are mutually exclusive
+/// (checked by CLI). Corrupt WAL fails startup with an I/O error.
 pub fn listen(
     bind: &str,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 ) -> io::Result<()> {
-    let listener = TcpListener::bind(bind)?;
-    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
-    eprintln!("janus: listening on {bind}");
-    accept_loop_with_kernel(listener, kernel)
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(listen_async(bind, dbfile, wal))
 }
 
-/// Accept connections from an already-bound listener (empty in-memory store).
-pub fn accept_loop(listener: TcpListener) -> io::Result<()> {
+async fn listen_async(
+    bind: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let listener = TcpListener::bind(bind).await?;
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    eprintln!("janus: listening on {bind}");
+    accept_loop_with_kernel(listener, kernel).await
+}
+
+/// Accept connections from an already-bound std listener (empty in-memory store).
+///
+/// Used by e2e harness: converts to Tokio listener inside a dedicated runtime.
+pub fn accept_loop(listener: StdTcpListener) -> io::Result<()> {
     accept_loop_with_dbfile(listener, None)
 }
 
 /// Accept connections with an optional snapshot path (boot load + SAVE).
 pub fn accept_loop_with_dbfile(
-    listener: TcpListener,
+    listener: StdTcpListener,
     dbfile: Option<PathBuf>,
 ) -> io::Result<()> {
-    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, None)?));
-    accept_loop_with_kernel(listener, kernel)
+    accept_loop_std(listener, dbfile, None)
 }
 
 /// Accept connections with an optional WAL path (boot replay + append).
-pub fn accept_loop_with_wal(listener: TcpListener, wal: Option<PathBuf>) -> io::Result<()> {
-    let kernel = Arc::new(Mutex::new(build_kernel(None, wal)?));
-    accept_loop_with_kernel(listener, kernel)
+pub fn accept_loop_with_wal(listener: StdTcpListener, wal: Option<PathBuf>) -> io::Result<()> {
+    accept_loop_std(listener, None, wal)
 }
 
-fn accept_loop_with_kernel(
+fn accept_loop_std(
+    listener: StdTcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    listener.set_nonblocking(true)?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let listener = TcpListener::from_std(listener)?;
+        let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+        accept_loop_with_kernel(listener, kernel).await
+    })
+}
+
+async fn accept_loop_with_kernel(
     listener: TcpListener,
     kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,
 ) -> io::Result<()> {
-    for connection in listener.incoming() {
-        match connection {
-            Ok(stream) => spawn_connection(stream, Arc::clone(&kernel)),
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => spawn_connection(stream, Arc::clone(&kernel)),
             Err(err) => eprintln!("janus: accept error: {err}"),
         }
     }
-    Ok(())
 }
 
 fn build_kernel(
@@ -91,7 +120,10 @@ fn build_kernel(
     }
 }
 
-fn spawn_connection(stream: TcpStream, kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>) {
+fn spawn_connection(
+    stream: tokio::net::TcpStream,
+    kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,
+) {
     let protocol = RespProtocol::shared(kernel, RespSerializer);
     TcpInstance::spawn(stream, protocol);
 }

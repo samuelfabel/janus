@@ -5,30 +5,27 @@ use crate::{
     kernel::kernel::{Kernel, lock_kernel},
     protocol::{Protocol, ProtocolError},
     serializer::{DecodeOutcome, Serializer},
-    storage::engine::StorageEngine,
 };
 
 /// RESP protocol instance bound to a kernel and serializer.
 ///
 /// Multi-connection servers use [`RespProtocol::shared`] with one
-/// process-wide `Arc<Mutex<Kernel<_>>>`. [`RespProtocol::new`] wraps a
+/// process-wide `Arc<Mutex<Kernel>>`. [`RespProtocol::new`] wraps a
 /// private mutex for single-connection / unit fixtures.
-pub struct RespProtocol<E, S>
+pub struct RespProtocol<S>
 where
-    E: StorageEngine + Send + 'static,
     S: Serializer,
 {
-    kernel: Arc<Mutex<Kernel<E>>>,
+    kernel: Arc<Mutex<Kernel>>,
     serializer: S,
 }
 
-impl<E, S> RespProtocol<E, S>
+impl<S> RespProtocol<S>
 where
-    E: StorageEngine + Send + 'static,
     S: Serializer,
 {
     /// Wrap `kernel` in a private mutex (single-connection / tests).
-    pub fn new(kernel: Kernel<E>, serializer: S) -> Self {
+    pub fn new(kernel: Kernel, serializer: S) -> Self {
         RespProtocol {
             kernel: Arc::new(Mutex::new(kernel)),
             serializer,
@@ -36,14 +33,13 @@ where
     }
 
     /// Canonical multi-connection path: share one process-wide kernel mutex.
-    pub fn shared(kernel: Arc<Mutex<Kernel<E>>>, serializer: S) -> Self {
+    pub fn shared(kernel: Arc<Mutex<Kernel>>, serializer: S) -> Self {
         RespProtocol { kernel, serializer }
     }
 }
 
-impl<E, S> Protocol for RespProtocol<E, S>
+impl<S> Protocol for RespProtocol<S>
 where
-    E: StorageEngine + Send + 'static,
     S: Serializer,
 {
     fn execute(
@@ -99,7 +95,7 @@ mod tests {
         storage::memory::MemoryStorageEngine,
     };
 
-    fn protocol() -> RespProtocol<MemoryStorageEngine, RespSerializer> {
+    fn protocol() -> RespProtocol<RespSerializer> {
         RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer)
     }
 

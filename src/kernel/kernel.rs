@@ -22,12 +22,10 @@ const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
 /// Lock a shared kernel, recovering from poison via [`PoisonError::into_inner`](std::sync::PoisonError::into_inner).
 ///
 /// The domain [`Kernel`] is single-threaded. Process-wide sharing uses
-/// `Arc<Mutex<Kernel<_>>>`; each [`Kernel::execute`] runs under this lock and
+/// `Arc<Mutex<Kernel>>`; each [`Kernel::execute`] runs under this lock and
 /// releases it before the next command on the same thread. A poisoned mutex is
 /// recovered so a panicked holder does not abort the pedagogical server.
-pub fn lock_kernel<S: StorageEngine>(
-    mutex: &Mutex<Kernel<S>>,
-) -> MutexGuard<'_, Kernel<S>> {
+pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -35,42 +33,46 @@ pub fn lock_kernel<S: StorageEngine>(
 
 /// Executes domain commands against a storage engine.
 ///
-/// The kernel itself is single-threaded. Share across threads with
-/// `Arc<Mutex<Kernel<_>>>` and [`lock_kernel`].
+/// Storage is type-erased (`Box<dyn StorageEngine>`) so callers inject any
+/// plugin behind the same Kernel. Share across threads with
+/// `Arc<Mutex<Kernel>>` and [`lock_kernel`].
 ///
 /// When a WAL is configured, successful `Set` / `Delete` / `Expire` mutations
 /// are applied to storage first, then appended. If the append fails, the
 /// storage mutation is **not** rolled back and the client receives
 /// [`ERR_WAL_APPEND_FAILED`](ERR_WAL_APPEND_FAILED).
-pub struct Kernel<S: StorageEngine> {
-    storage: S,
+pub struct Kernel {
+    storage: Box<dyn StorageEngine>,
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
 }
 
-impl<S: StorageEngine> Kernel<S> {
+impl Kernel {
     /// Creates a kernel bound to `storage` with persistence disabled.
-    pub fn new(storage: S) -> Self {
+    pub fn new(storage: impl StorageEngine + 'static) -> Self {
         Kernel {
-            storage,
+            storage: Box::new(storage),
             store: None,
             wal: None,
         }
     }
 
     /// Creates a kernel with an injected snapshot store (`--dbfile`).
-    pub fn with_store(storage: S, store: Box<dyn SnapshotStore>) -> Self {
+    pub fn with_store(
+        storage: impl StorageEngine + 'static,
+        store: Box<dyn SnapshotStore>,
+    ) -> Self {
         Kernel {
-            storage,
+            storage: Box::new(storage),
             store: Some(store),
             wal: None,
         }
     }
 
     /// Creates a kernel with an append-only WAL (`--wal`).
-    pub fn with_wal(storage: S, wal: WalWriter) -> Self {
+    pub fn with_wal(storage: impl StorageEngine + 'static, wal: WalWriter) -> Self {
         Kernel {
-            storage,
+            storage: Box::new(storage),
             store: None,
             wal: Some(wal),
         }
@@ -78,8 +80,8 @@ impl<S: StorageEngine> Kernel<S> {
 
     /// Mutable access to the bound storage (tests).
     #[cfg(test)]
-    pub fn storage_mut(&mut self) -> &mut S {
-        &mut self.storage
+    pub fn storage_mut(&mut self) -> &mut dyn StorageEngine {
+        self.storage.as_mut()
     }
 
     /// Runs `command` and returns a domain response (no RESP bytes).
@@ -180,8 +182,10 @@ mod tests {
     const VALUE: &[u8] = b"value1";
     const VALUE2: &[u8] = b"value2";
 
-    fn kernel_with_fake_clock() -> Kernel<MemoryStorageEngine<FakeClock>> {
-        Kernel::new(MemoryStorageEngine::with_clock(FakeClock::new()))
+    fn kernel_with_fake_clock() -> (Kernel, FakeClock) {
+        let clock = FakeClock::new();
+        let kernel = Kernel::new(MemoryStorageEngine::with_clock(clock.clone()));
+        (kernel, clock)
     }
 
     fn temp_dbfile(name: &str) -> PathBuf {
@@ -280,7 +284,7 @@ mod tests {
 
     #[test]
     fn expire_existing_and_missing() {
-        let mut kernel = kernel_with_fake_clock();
+        let (mut kernel, _clock) = kernel_with_fake_clock();
         assert_eq!(
             kernel.execute(&Command::Expire {
                 key: KEY,
@@ -303,7 +307,7 @@ mod tests {
 
     #[test]
     fn ttl_codes_and_remaining_seconds() {
-        let mut kernel = kernel_with_fake_clock();
+        let (mut kernel, _clock) = kernel_with_fake_clock();
         assert_eq!(
             kernel.execute(&Command::Ttl { key: KEY }),
             Response::Integer(-2)
@@ -331,7 +335,7 @@ mod tests {
 
     #[test]
     fn get_after_deadline_is_none() {
-        let mut kernel = kernel_with_fake_clock();
+        let (mut kernel, clock) = kernel_with_fake_clock();
         kernel.execute(&Command::Set {
             key: KEY,
             value: VALUE,
@@ -340,7 +344,7 @@ mod tests {
             key: KEY,
             seconds: 1,
         });
-        kernel.storage_mut().clock_mut().advance(Duration::from_secs(2));
+        clock.advance(Duration::from_secs(2));
         assert_eq!(
             kernel.execute(&Command::Get { key: KEY }),
             Response::Value(None)
@@ -353,7 +357,7 @@ mod tests {
 
     #[test]
     fn expire_zero_seconds_expires_immediately_on_access() {
-        let mut kernel = kernel_with_fake_clock();
+        let (mut kernel, _clock) = kernel_with_fake_clock();
         kernel.execute(&Command::Set {
             key: KEY,
             value: VALUE,

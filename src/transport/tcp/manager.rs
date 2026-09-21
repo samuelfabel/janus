@@ -47,7 +47,7 @@ pub async fn serve(
 
 async fn accept_loop_with_kernel(
     listener: TcpListener,
-    kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,
+    kernel: Arc<Mutex<Kernel>>,
 ) -> io::Result<()> {
     loop {
         match listener.accept().await {
@@ -60,7 +60,7 @@ async fn accept_loop_with_kernel(
 fn build_kernel(
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
-) -> io::Result<Kernel<MemoryStorageEngine>> {
+) -> io::Result<Kernel> {
     let mut engine = MemoryStorageEngine::new();
     match (dbfile, wal) {
         (Some(_), Some(_)) => Err(io::Error::new(
@@ -81,10 +81,7 @@ fn build_kernel(
     }
 }
 
-fn spawn_connection(
-    stream: tokio::net::TcpStream,
-    kernel: Arc<Mutex<Kernel<MemoryStorageEngine>>>,
-) {
+fn spawn_connection(stream: tokio::net::TcpStream, kernel: Arc<Mutex<Kernel>>) {
     let protocol = RespProtocol::shared(kernel, RespSerializer);
     TcpInstance::spawn(stream, protocol);
 }

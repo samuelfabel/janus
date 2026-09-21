@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Kernel stores `Box<dyn StorageEngine>` (type-erased storage plugin); `FakeClock` clones share time for tests behind dyn
 - TCP transport: growable per-connection buffer, compact-by-offset, write failure closes connection; e2e SET/GET/DEL, multi-message, and fragmented-frame tests
 - In-memory storage supports per-key TTL with lazy expire (`expire_at` / `ttl`); `get` takes `&mut self`
 - Kernel `Expire` / `Ttl` commands and `Response::Integer` (Redis-style -2/-1/seconds)

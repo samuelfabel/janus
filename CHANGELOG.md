@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Composition-root `build_storage()` (default Memory) and Kernel `from_boxed*` injectors; README modular storage notes
 - `BTreeStorageEngine` (`BTreeMap` plugin) with contract tests and Kernel smoke behind `Box<dyn StorageEngine>`
 - `StorageEngine` trait and `MemoryStorageEngine` with unit tests for get/set/delete
 - Public landing page under `site/` with GitHub Pages workflow

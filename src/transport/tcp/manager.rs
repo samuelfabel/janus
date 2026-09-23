@@ -13,7 +13,7 @@ use crate::{
     protocol::resp::RespProtocol,
     serializer::resp::RespSerializer,
     storage::{
-        memory::MemoryStorageEngine,
+        build_storage,
         store::{FileSnapshotStore, boot_load},
         wal::boot_wal,
     },
@@ -57,27 +57,25 @@ async fn accept_loop_with_kernel(
     }
 }
 
-fn build_kernel(
-    dbfile: Option<PathBuf>,
-    wal: Option<PathBuf>,
-) -> io::Result<Kernel> {
-    let mut engine = MemoryStorageEngine::new();
+/// Composition root: inject [`build_storage`] (Memory by default) into the Kernel.
+fn build_kernel(dbfile: Option<PathBuf>, wal: Option<PathBuf>) -> io::Result<Kernel> {
+    let mut engine = build_storage();
     match (dbfile, wal) {
         (Some(_), Some(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "ERR conflicting persistence",
         )),
         (None, Some(path)) => {
-            let writer = boot_wal(&path, &mut engine)
+            let writer = boot_wal(&path, engine.as_mut())
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-            Ok(Kernel::with_wal(engine, writer))
+            Ok(Kernel::from_boxed_with_wal(engine, writer))
         }
         (Some(path), None) => {
             let store = FileSnapshotStore::new(path);
-            boot_load(&mut engine, &store)?;
-            Ok(Kernel::with_store(engine, Box::new(store)))
+            boot_load(engine.as_mut(), &store)?;
+            Ok(Kernel::from_boxed_with_store(engine, Box::new(store)))
         }
-        (None, None) => Ok(Kernel::new(engine)),
+        (None, None) => Ok(Kernel::from_boxed(engine)),
     }
 }
 

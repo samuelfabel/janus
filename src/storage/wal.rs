@@ -104,7 +104,7 @@ impl WalWriter {
 /// Expire deadlines use Unix seconds: remaining = `deadline_unix - now_unix`,
 /// mapped onto `engine.now()` (monotonic Instant). Past deadlines become
 /// `expire_at(now)` so lazy purge removes the key on access.
-pub fn replay(path: impl AsRef<Path>, engine: &mut impl StorageEngine) -> Result<(), WalError> {
+pub fn replay(path: impl AsRef<Path>, engine: &mut (impl StorageEngine + ?Sized)) -> Result<(), WalError> {
     let mut file = File::open(path)?;
     validate_header(&mut file)?;
 
@@ -125,7 +125,7 @@ pub fn replay(path: impl AsRef<Path>, engine: &mut impl StorageEngine) -> Result
 /// WAL → `Err` (hard-fail startup).
 pub fn boot_wal(
     path: impl AsRef<Path>,
-    engine: &mut impl StorageEngine,
+    engine: &mut (impl StorageEngine + ?Sized),
 ) -> Result<WalWriter, WalError> {
     let path = path.as_ref();
     if path.exists() {
@@ -231,7 +231,7 @@ fn read_array<const N: usize>(buf: &[u8], cursor: &mut usize) -> Result<[u8; N],
     Ok(arr)
 }
 
-fn apply_record(engine: &mut impl StorageEngine, record: &WalRecord) {
+fn apply_record(engine: &mut (impl StorageEngine + ?Sized), record: &WalRecord) {
     match record {
         WalRecord::Set { key, value } => engine.set(key, value),
         WalRecord::Delete { key } => {
@@ -251,7 +251,7 @@ fn apply_record(engine: &mut impl StorageEngine, record: &WalRecord) {
 ///
 /// `remaining = deadline_unix.saturating_sub(now_unix)`;
 /// past/equal → `engine.now()` (expires on next access).
-fn unix_to_engine_deadline(engine: &impl StorageEngine, deadline_unix_secs: u64) -> Instant {
+fn unix_to_engine_deadline(engine: &(impl StorageEngine + ?Sized), deadline_unix_secs: u64) -> Instant {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

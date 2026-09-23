@@ -66,7 +66,7 @@ impl SnapshotStore for FileSnapshotStore {
 ///
 /// Missing file → no-op. Corrupt / invalid snapshot → hard error.
 pub fn boot_load(
-    engine: &mut impl StorageEngine,
+    engine: &mut (impl StorageEngine + ?Sized),
     store: &impl SnapshotStore,
 ) -> Result<(), BootError> {
     match store.load().map_err(BootError::Io)? {

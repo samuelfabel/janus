@@ -11,7 +11,8 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 
 - Layered design: transport, protocol, serializer, kernel, storage
 - First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE`)
-- Storage behind a trait so engines can be swapped later
+- Modular storage: `StorageEngine` trait + `Box<dyn StorageEngine>` in the Kernel (dependency inversion)
+- Default plugin: `MemoryStorageEngine` (`HashMap`); pedagogical second plugin: `BTreeStorageEngine` (`BTreeMap`)
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
@@ -24,7 +25,7 @@ This project does **not**:
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over an in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
 ## Install / build
 

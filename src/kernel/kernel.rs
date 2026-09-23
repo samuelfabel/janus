@@ -50,8 +50,13 @@ pub struct Kernel {
 impl Kernel {
     /// Creates a kernel bound to `storage` with persistence disabled.
     pub fn new(storage: impl StorageEngine + 'static) -> Self {
+        Self::from_boxed(Box::new(storage))
+    }
+
+    /// Creates a kernel from an already type-erased storage plugin (composition root).
+    pub fn from_boxed(storage: Box<dyn StorageEngine>) -> Self {
         Kernel {
-            storage: Box::new(storage),
+            storage,
             store: None,
             wal: None,
         }
@@ -62,8 +67,16 @@ impl Kernel {
         storage: impl StorageEngine + 'static,
         store: Box<dyn SnapshotStore>,
     ) -> Self {
+        Self::from_boxed_with_store(Box::new(storage), store)
+    }
+
+    /// Type-erased storage + snapshot store (composition root).
+    pub fn from_boxed_with_store(
+        storage: Box<dyn StorageEngine>,
+        store: Box<dyn SnapshotStore>,
+    ) -> Self {
         Kernel {
-            storage: Box::new(storage),
+            storage,
             store: Some(store),
             wal: None,
         }
@@ -71,8 +84,13 @@ impl Kernel {
 
     /// Creates a kernel with an append-only WAL (`--wal`).
     pub fn with_wal(storage: impl StorageEngine + 'static, wal: WalWriter) -> Self {
+        Self::from_boxed_with_wal(Box::new(storage), wal)
+    }
+
+    /// Type-erased storage + WAL (composition root).
+    pub fn from_boxed_with_wal(storage: Box<dyn StorageEngine>, wal: WalWriter) -> Self {
         Kernel {
-            storage: Box::new(storage),
+            storage,
             store: None,
             wal: Some(wal),
         }
@@ -80,6 +98,7 @@ impl Kernel {
 
     /// Mutable access to the bound storage (tests).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn storage_mut(&mut self) -> &mut dyn StorageEngine {
         self.storage.as_mut()
     }

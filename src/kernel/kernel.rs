@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::{
     command::types::Command,
+    replication::{ReplicationRecord, ReplicationSink},
     response::types::Response,
     storage::{
         engine::{StorageEngine, Ttl},
@@ -18,6 +19,7 @@ use crate::{
 const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
 const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
+const ERR_REPLICATION_FAILED: &str = "ERR replication failed";
 
 /// Lock a shared kernel, recovering from poison via [`PoisonError::into_inner`](std::sync::PoisonError::into_inner).
 ///
@@ -41,10 +43,16 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// are applied to storage first, then appended. If the append fails, the
 /// storage mutation is **not** rolled back and the client receives
 /// [`ERR_WAL_APPEND_FAILED`](ERR_WAL_APPEND_FAILED).
+///
+/// When a [`ReplicationSink`] is configured, the same successful mutations are
+/// notified after the local apply (and after WAL when both are set). Sink
+/// failure returns [`ERR_REPLICATION_FAILED`](ERR_REPLICATION_FAILED) without
+/// rolling back the local mutation (same trade-off as WAL).
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
+    replication: Option<Box<dyn ReplicationSink>>,
 }
 
 impl Kernel {
@@ -59,6 +67,7 @@ impl Kernel {
             storage,
             store: None,
             wal: None,
+            replication: None,
         }
     }
 
@@ -79,6 +88,7 @@ impl Kernel {
             storage,
             store: Some(store),
             wal: None,
+            replication: None,
         }
     }
 
@@ -93,6 +103,28 @@ impl Kernel {
             storage,
             store: None,
             wal: Some(wal),
+            replication: None,
+        }
+    }
+
+    /// Primary with a replication sink (pedagogical Phase 10).
+    pub fn with_replica(
+        storage: impl StorageEngine + 'static,
+        sink: Box<dyn ReplicationSink>,
+    ) -> Self {
+        Self::from_boxed_with_replica(Box::new(storage), sink)
+    }
+
+    /// Type-erased storage + replication sink.
+    pub fn from_boxed_with_replica(
+        storage: Box<dyn StorageEngine>,
+        sink: Box<dyn ReplicationSink>,
+    ) -> Self {
+        Kernel {
+            storage,
+            store: None,
+            wal: None,
+            replication: Some(sink),
         }
     }
 
@@ -114,6 +146,12 @@ impl Kernel {
                 }) {
                     return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
                 }
+                if let Err(()) = self.replicate(&ReplicationRecord::Set {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                }) {
+                    return Response::Error(ERR_REPLICATION_FAILED.to_string());
+                }
                 Response::Empty
             }
             Command::Get { key } => {
@@ -126,6 +164,11 @@ impl Kernel {
                         key: key.to_vec(),
                     }) {
                         return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
+                    }
+                    if let Err(()) = self.replicate(&ReplicationRecord::Delete {
+                        key: key.to_vec(),
+                    }) {
+                        return Response::Error(ERR_REPLICATION_FAILED.to_string());
                     }
                 }
                 Response::Deleted(deleted)
@@ -141,6 +184,12 @@ impl Kernel {
                         deadline_unix_secs,
                     }) {
                         return Response::Error(ERR_WAL_APPEND_FAILED.to_string());
+                    }
+                    if let Err(()) = self.replicate(&ReplicationRecord::Expire {
+                        key: key.to_vec(),
+                        seconds: *seconds,
+                    }) {
+                        return Response::Error(ERR_REPLICATION_FAILED.to_string());
                     }
                     Response::Integer(1)
                 } else {
@@ -166,6 +215,13 @@ impl Kernel {
         wal.append(record).map_err(|_| ())
     }
 
+    fn replicate(&mut self, record: &ReplicationRecord) -> Result<(), ()> {
+        let Some(sink) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        sink.replicate(record)
+    }
+
     fn save(&mut self) -> Response {
         let Some(store) = self.store.as_ref() else {
             return Response::Error(ERR_SAVE_DISABLED.to_string());
@@ -176,6 +232,27 @@ impl Kernel {
             Ok(()) => Response::Empty,
             Err(_) => Response::Error(ERR_SAVE_FAILED.to_string()),
         }
+    }
+}
+
+/// Apply a replication record on a replica kernel (no sink required).
+///
+/// Maps each [`ReplicationRecord`] to the matching domain [`Command`] and runs
+/// [`Kernel::execute`]. Expire deadlines are relative to the replica's
+/// `storage.now()` at apply time.
+pub fn apply_replication_record(kernel: &mut Kernel, record: &ReplicationRecord) -> Response {
+    match record {
+        ReplicationRecord::Set { key, value } => kernel.execute(&Command::Set {
+            key: key.as_slice(),
+            value: value.as_slice(),
+        }),
+        ReplicationRecord::Delete { key } => {
+            kernel.execute(&Command::Delete { key: key.as_slice() })
+        }
+        ReplicationRecord::Expire { key, seconds } => kernel.execute(&Command::Expire {
+            key: key.as_slice(),
+            seconds: *seconds,
+        }),
     }
 }
 
@@ -713,5 +790,192 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// Channel sink: primary replicates into a Vec the replica can drain.
+    struct ChannelSink {
+        records: Arc<Mutex<Vec<ReplicationRecord>>>,
+    }
+
+    impl ReplicationSink for ChannelSink {
+        fn replicate(&mut self, record: &ReplicationRecord) -> Result<(), ()> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+    }
+
+    /// Sink that always fails (tests ERR replication failed).
+    struct FailingSink;
+
+    impl ReplicationSink for FailingSink {
+        fn replicate(&mut self, _record: &ReplicationRecord) -> Result<(), ()> {
+            Err(())
+        }
+    }
+
+    #[test]
+    fn primary_sink_apply_replica_get_hit() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut primary = Kernel::with_replica(
+            MemoryStorageEngine::new(),
+            Box::new(ChannelSink {
+                records: Arc::clone(&records),
+            }),
+        );
+        assert_eq!(
+            primary.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            primary.execute(&Command::Expire {
+                key: KEY,
+                seconds: 30
+            }),
+            Response::Integer(1)
+        );
+
+        let mut replica = Kernel::new(MemoryStorageEngine::new());
+        for record in records.lock().unwrap().drain(..) {
+            apply_replication_record(&mut replica, &record);
+        }
+        assert_eq!(
+            replica.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+        match replica.execute(&Command::Ttl { key: KEY }) {
+            Response::Integer(n) => assert!((1..=30).contains(&n)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primary_delete_replicates_and_replica_miss() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut primary = Kernel::with_replica(
+            MemoryStorageEngine::new(),
+            Box::new(ChannelSink {
+                records: Arc::clone(&records),
+            }),
+        );
+        primary.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        assert_eq!(
+            primary.execute(&Command::Delete { key: KEY }),
+            Response::Deleted(true)
+        );
+
+        let mut replica = Kernel::new(MemoryStorageEngine::new());
+        for record in records.lock().unwrap().drain(..) {
+            apply_replication_record(&mut replica, &record);
+        }
+        assert_eq!(
+            replica.execute(&Command::Get { key: KEY }),
+            Response::Value(None)
+        );
+    }
+
+    #[test]
+    fn get_ttl_save_do_not_replicate() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut primary = Kernel::with_replica(
+            MemoryStorageEngine::new(),
+            Box::new(ChannelSink {
+                records: Arc::clone(&records),
+            }),
+        );
+        primary.execute(&Command::Set {
+            key: KEY,
+            value: VALUE,
+        });
+        records.lock().unwrap().clear();
+
+        let _ = primary.execute(&Command::Get { key: KEY });
+        let _ = primary.execute(&Command::Ttl { key: KEY });
+        let _ = primary.execute(&Command::Save);
+        assert!(records.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_miss_and_expire_miss_do_not_replicate() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut primary = Kernel::with_replica(
+            MemoryStorageEngine::new(),
+            Box::new(ChannelSink {
+                records: Arc::clone(&records),
+            }),
+        );
+        assert_eq!(
+            primary.execute(&Command::Delete { key: KEY }),
+            Response::Deleted(false)
+        );
+        assert_eq!(
+            primary.execute(&Command::Expire {
+                key: KEY,
+                seconds: 10
+            }),
+            Response::Integer(0)
+        );
+        assert!(records.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sink_failure_returns_error_without_rollback() {
+        let mut primary =
+            Kernel::with_replica(MemoryStorageEngine::new(), Box::new(FailingSink));
+        assert_eq!(
+            primary.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Error(ERR_REPLICATION_FAILED.to_string())
+        );
+        // Local mutation kept (same trade-off as WAL append fail).
+        assert_eq!(
+            primary.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+    }
+
+    #[test]
+    fn apply_replication_record_set_delete_expire() {
+        let mut replica = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            apply_replication_record(
+                &mut replica,
+                &ReplicationRecord::Set {
+                    key: KEY.to_vec(),
+                    value: VALUE.to_vec(),
+                }
+            ),
+            Response::Empty
+        );
+        assert_eq!(
+            apply_replication_record(
+                &mut replica,
+                &ReplicationRecord::Expire {
+                    key: KEY.to_vec(),
+                    seconds: 5,
+                }
+            ),
+            Response::Integer(1)
+        );
+        assert_eq!(
+            apply_replication_record(
+                &mut replica,
+                &ReplicationRecord::Delete {
+                    key: KEY.to_vec(),
+                }
+            ),
+            Response::Deleted(true)
+        );
+        assert_eq!(
+            replica.execute(&Command::Get { key: KEY }),
+            Response::Value(None)
+        );
     }
 }

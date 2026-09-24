@@ -1,6 +1,7 @@
 mod command;
 mod kernel;
 mod protocol;
+pub mod replication;
 pub mod response;
 mod serializer;
 pub mod shared;

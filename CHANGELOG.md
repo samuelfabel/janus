@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- TCP e2e for `MULTI` / `EXEC` / `DISCARD` and README transactions notes (pedagogical queue; no WATCH/ACID)
 - RESP decode for `MULTI` / `EXEC` / `DISCARD` (arity 1) with fixtures for Queued / Array encode
 - Kernel `MULTI` / `EXEC` / `DISCARD` transaction queue with `Response::Queued` and `Response::Array` (RESP encode for exhaustiveness; decode in F9-02)
 - In-process primary→replica replication harness and README Phase 10 notes (single-node default; no Raft/cluster)

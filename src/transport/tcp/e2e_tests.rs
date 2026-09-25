@@ -450,3 +450,56 @@ async fn e2e_two_clients_interleaved_distinct_keys() {
         h.join().expect("client");
     }
 }
+
+const MULTI: &[u8] = b"*1\r\n$5\r\nMULTI\r\n";
+const EXEC: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
+const DISCARD: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
+
+/// V9-SCOPE: MULTI → SET a → SET b → EXEC → GET both hit.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_multi_exec_get_hits() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    let set_a = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
+    let set_b = b"*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$1\r\n2\r\n";
+    let get_a = b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
+    let get_b = b"*2\r\n$3\r\nGET\r\n$1\r\nb\r\n";
+
+    client.write_all(MULTI).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(set_a).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(set_b).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(EXEC).unwrap();
+    assert_eq!(read_exact(&mut client, 14), b"*2\r\n+OK\r\n+OK\r\n");
+
+    client.write_all(get_a).unwrap();
+    assert_eq!(read_exact(&mut client, 7), b"$1\r\n1\r\n");
+
+    client.write_all(get_b).unwrap();
+    assert_eq!(read_exact(&mut client, 7), b"$1\r\n2\r\n");
+}
+
+/// V9-SCOPE: MULTI → SET → DISCARD → GET miss (queue not applied).
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_multi_discard_does_not_apply() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(MULTI).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(DISCARD).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+}

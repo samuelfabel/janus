@@ -20,6 +20,48 @@ const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
 const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
 const ERR_REPLICATION_FAILED: &str = "ERR replication failed";
+const ERR_MULTI_NESTED: &str = "ERR MULTI calls can not be nested";
+const ERR_EXEC_WITHOUT_MULTI: &str = "ERR EXEC without MULTI";
+const ERR_DISCARD_WITHOUT_MULTI: &str = "ERR DISCARD without MULTI";
+
+/// Owned domain command held in a MULTI queue (keys/values copied at enqueue).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueuedCommand {
+    Set { key: Vec<u8>, value: Vec<u8> },
+    Get { key: Vec<u8> },
+    Delete { key: Vec<u8> },
+    Expire { key: Vec<u8>, seconds: u64 },
+    Ttl { key: Vec<u8> },
+    Save,
+}
+
+impl QueuedCommand {
+    fn from_command(command: &Command<'_>) -> Self {
+        match command {
+            Command::Set { key, value } => QueuedCommand::Set {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            },
+            Command::Get { key } => QueuedCommand::Get {
+                key: key.to_vec(),
+            },
+            Command::Delete { key } => QueuedCommand::Delete {
+                key: key.to_vec(),
+            },
+            Command::Expire { key, seconds } => QueuedCommand::Expire {
+                key: key.to_vec(),
+                seconds: *seconds,
+            },
+            Command::Ttl { key } => QueuedCommand::Ttl {
+                key: key.to_vec(),
+            },
+            Command::Save => QueuedCommand::Save,
+            Command::Multi | Command::Exec | Command::Discard => {
+                unreachable!("transaction control commands are not queued")
+            }
+        }
+    }
+}
 
 /// Lock a shared kernel, recovering from poison via [`PoisonError::into_inner`](std::sync::PoisonError::into_inner).
 ///
@@ -48,11 +90,17 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// notified after the local apply (and after WAL when both are set). Sink
 /// failure returns [`ERR_REPLICATION_FAILED`](ERR_REPLICATION_FAILED) without
 /// rolling back the local mutation (same trade-off as WAL).
+///
+/// After [`Command::Multi`], subsequent domain commands are queued until
+/// [`Command::Exec`] (apply in order) or [`Command::Discard`] (abort). Nested
+/// `MULTI` is rejected.
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
     replication: Option<Box<dyn ReplicationSink>>,
+    in_multi: bool,
+    multi_queue: Vec<QueuedCommand>,
 }
 
 impl Kernel {
@@ -68,6 +116,8 @@ impl Kernel {
             store: None,
             wal: None,
             replication: None,
+            in_multi: false,
+            multi_queue: Vec::new(),
         }
     }
 
@@ -89,6 +139,8 @@ impl Kernel {
             store: Some(store),
             wal: None,
             replication: None,
+            in_multi: false,
+            multi_queue: Vec::new(),
         }
     }
 
@@ -104,6 +156,8 @@ impl Kernel {
             store: None,
             wal: Some(wal),
             replication: None,
+            in_multi: false,
+            multi_queue: Vec::new(),
         }
     }
 
@@ -125,6 +179,8 @@ impl Kernel {
             store: None,
             wal: None,
             replication: Some(sink),
+            in_multi: false,
+            multi_queue: Vec::new(),
         }
     }
 
@@ -137,6 +193,67 @@ impl Kernel {
 
     /// Runs `command` and returns a domain response (no RESP bytes).
     pub fn execute(&mut self, command: &Command<'_>) -> Response {
+        match command {
+            Command::Multi => {
+                if self.in_multi {
+                    return Response::Error(ERR_MULTI_NESTED.to_string());
+                }
+                self.in_multi = true;
+                self.multi_queue.clear();
+                Response::Empty
+            }
+            Command::Exec => {
+                if !self.in_multi {
+                    return Response::Error(ERR_EXEC_WITHOUT_MULTI.to_string());
+                }
+                self.in_multi = false;
+                let queued = std::mem::take(&mut self.multi_queue);
+                let mut results = Vec::with_capacity(queued.len());
+                for item in queued {
+                    results.push(self.apply_queued(item));
+                }
+                Response::Array(results)
+            }
+            Command::Discard => {
+                if !self.in_multi {
+                    return Response::Error(ERR_DISCARD_WITHOUT_MULTI.to_string());
+                }
+                self.in_multi = false;
+                self.multi_queue.clear();
+                Response::Empty
+            }
+            other if self.in_multi => {
+                self.multi_queue.push(QueuedCommand::from_command(other));
+                Response::Queued
+            }
+            other => self.execute_immediate(other),
+        }
+    }
+
+    fn apply_queued(&mut self, queued: QueuedCommand) -> Response {
+        match queued {
+            QueuedCommand::Set { key, value } => self.execute_immediate(&Command::Set {
+                key: key.as_slice(),
+                value: value.as_slice(),
+            }),
+            QueuedCommand::Get { key } => {
+                self.execute_immediate(&Command::Get { key: key.as_slice() })
+            }
+            QueuedCommand::Delete { key } => {
+                self.execute_immediate(&Command::Delete { key: key.as_slice() })
+            }
+            QueuedCommand::Expire { key, seconds } => self.execute_immediate(&Command::Expire {
+                key: key.as_slice(),
+                seconds,
+            }),
+            QueuedCommand::Ttl { key } => {
+                self.execute_immediate(&Command::Ttl { key: key.as_slice() })
+            }
+            QueuedCommand::Save => self.execute_immediate(&Command::Save),
+        }
+    }
+
+    fn execute_immediate(&mut self, command: &Command<'_>) -> Response {
         match command {
             Command::Set { key, value } => {
                 self.storage.set(key, value);
@@ -205,6 +322,9 @@ impl Kernel {
                 Response::Integer(code)
             }
             Command::Save => self.save(),
+            Command::Multi | Command::Exec | Command::Discard => {
+                unreachable!("transaction control handled in execute")
+            }
         }
     }
 
@@ -977,5 +1097,80 @@ mod tests {
             replica.execute(&Command::Get { key: KEY }),
             Response::Value(None)
         );
+    }
+
+    #[test]
+    fn multi_set_set_exec_get_hits() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"a",
+                value: b"1",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"b",
+                value: b"2",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Array(vec![Response::Empty, Response::Empty])
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"a" }),
+            Response::Value(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"b" }),
+            Response::Value(Some(b"2".to_vec()))
+        );
+    }
+
+    #[test]
+    fn discard_does_not_apply_queued_sets() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Queued
+        );
+        assert_eq!(kernel.execute(&Command::Discard), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Get { key: KEY }),
+            Response::Value(None)
+        );
+    }
+
+    #[test]
+    fn nested_multi_and_exec_without_multi_are_errors() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Error(ERR_EXEC_WITHOUT_MULTI.to_string())
+        );
+        assert_eq!(
+            kernel.execute(&Command::Discard),
+            Response::Error(ERR_DISCARD_WITHOUT_MULTI.to_string())
+        );
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Multi),
+            Response::Error(ERR_MULTI_NESTED.to_string())
+        );
+    }
+
+    #[test]
+    fn empty_exec_returns_empty_array() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(kernel.execute(&Command::Exec), Response::Array(vec![]));
     }
 }

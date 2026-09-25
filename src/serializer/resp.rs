@@ -15,6 +15,7 @@ impl Serializer for RespSerializer {
     fn encode(&self, response: &Response) -> Vec<u8> {
         match response {
             Response::Empty => b"+OK\r\n".to_vec(),
+            Response::Queued => b"+QUEUED\r\n".to_vec(),
             Response::Value(None) => b"$-1\r\n".to_vec(),
             Response::Deleted(true) => b":1\r\n".to_vec(),
             Response::Deleted(false) => b":0\r\n".to_vec(),
@@ -40,6 +41,16 @@ impl Serializer for RespSerializer {
                 buffer.extend_from_slice(b"\r\n");
                 buffer.extend_from_slice(payload);
                 buffer.extend_from_slice(b"\r\n");
+                buffer
+            }
+            Response::Array(items) => {
+                let mut buffer = Vec::new();
+                buffer.push(b'*');
+                buffer.extend_from_slice(items.len().to_string().as_bytes());
+                buffer.extend_from_slice(b"\r\n");
+                for item in items {
+                    buffer.extend_from_slice(&self.encode(item));
+                }
                 buffer
             }
         }
@@ -345,6 +356,7 @@ mod tests {
     fn encode_response_variants() {
         let s = RespSerializer;
         assert_eq!(s.encode(&Response::Empty), b"+OK\r\n");
+        assert_eq!(s.encode(&Response::Queued), b"+QUEUED\r\n");
         assert_eq!(s.encode(&Response::Value(None)), b"$-1\r\n");
         assert_eq!(s.encode(&Response::Deleted(true)), b":1\r\n");
         assert_eq!(s.encode(&Response::Deleted(false)), b":0\r\n");
@@ -362,6 +374,10 @@ mod tests {
         assert_eq!(
             s.encode(&Response::Value(Some(b"a\r\nb".to_vec()))),
             b"$4\r\na\r\nb\r\n"
+        );
+        assert_eq!(
+            s.encode(&Response::Array(vec![Response::Empty, Response::Integer(1)])),
+            b"*2\r\n+OK\r\n:1\r\n"
         );
     }
 

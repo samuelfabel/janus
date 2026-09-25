@@ -18,4 +18,10 @@ pub enum Command<'a> {
     Ttl { key: &'a [u8] },
     /// Synchronously persist the current store to the configured dbfile.
     Save,
+    /// Enter transaction mode (subsequent commands are queued until Exec/Discard).
+    Multi,
+    /// Apply the queued transaction commands in order.
+    Exec,
+    /// Abort the transaction and clear the queue without applying.
+    Discard,
 }

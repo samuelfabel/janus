@@ -13,6 +13,10 @@ pub enum Response {
     Deleted(bool),
     /// Integer result (EXPIRE 0/1, TTL -2/-1/seconds).
     Integer(i64),
+    /// Command accepted into a MULTI queue (serializer maps to `+QUEUED`).
+    Queued,
+    /// Ordered results from `EXEC` (empty when the queue was empty).
+    Array(Vec<Response>),
     /// Error message (serializer maps to a RESP simple error).
     Error(String),
 }

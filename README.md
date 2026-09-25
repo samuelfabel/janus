@@ -16,16 +16,20 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
+- Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
 
 This project does **not**:
 
 - Replace Redis or PostgreSQL
 - Aim to be production-ready in early versions
 - Bundle every Redis command or clustered topology on day one
+- Run a multi-node cluster or consensus protocol in the default server binary
 
 ## Status
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
+
+**Replication (Phase 10, pedagogical):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). Covered by the harness under `src/replication/harness.rs` — not a production cluster, Raft, failover, or sharding.
 
 ## Install / build
 
@@ -72,7 +76,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, and multi-client shared-store concurrency).
+Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, and the in-process primary→replica replication harness).
 
 ## Docker
 

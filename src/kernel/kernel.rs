@@ -1,1 +1,1 @@
-PLACEHOLDER_WILL_REPLACE
+@/workspace/.tmp-kernel-raw.txt

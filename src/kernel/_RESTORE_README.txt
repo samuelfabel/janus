@@ -1,0 +1,1 @@
+Full kernel.rs is at /tmp/FINAL_CONTENT.rs (39007 bytes, md5 1f9f0ef8ee03b8710274cac4c18b749b). MCP tool calls with ~39KB content keep getting substituted with placeholders in this agent session. Parts p0 and p8 staged under src/kernel/_restore/.

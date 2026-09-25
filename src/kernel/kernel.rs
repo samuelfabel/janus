@@ -1,1 +1,1 @@
-temporary
+$(cat /tmp/ONLY_CONTENT.rs)

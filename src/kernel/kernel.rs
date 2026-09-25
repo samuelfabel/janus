@@ -1,1 +1,1 @@
-$(cat /tmp/ONLY_CONTENT.rs)
+PLACEHOLDER

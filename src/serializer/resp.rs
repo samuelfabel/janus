@@ -1,4 +1,5 @@
-//! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE.
+//! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
+//! MULTI / EXEC / DISCARD.
 
 use crate::{
     command::types::Command,
@@ -230,6 +231,39 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"MULTI" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "MULTI arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Multi,
+                    consumed: cursor,
+                }
+            }
+            b"EXEC" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "EXEC arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Exec,
+                    consumed: cursor,
+                }
+            }
+            b"DISCARD" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "DISCARD arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Discard,
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -305,6 +339,9 @@ mod tests {
     const EXPIRE_FIXTURE: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n10\r\n";
     const TTL_FIXTURE: &[u8] = b"*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n";
     const SAVE_FIXTURE: &[u8] = b"*1\r\n$4\r\nSAVE\r\n";
+    const MULTI_FIXTURE: &[u8] = b"*1\r\n$5\r\nMULTI\r\n";
+    const EXEC_FIXTURE: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
+    const DISCARD_FIXTURE: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -446,6 +483,132 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn decode_multi_exec_discard_fixtures() {
+        let s = RespSerializer;
+        match s.decode_one(MULTI_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Multi,
+                consumed,
+            } => assert_eq!(consumed, MULTI_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        match s.decode_one(EXEC_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Exec,
+                consumed,
+            } => assert_eq!(consumed, EXEC_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        match s.decode_one(DISCARD_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Discard,
+                consumed,
+            } => assert_eq!(consumed, DISCARD_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$5\r\nmulti\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Multi,
+                ..
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$4\r\nExec\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Exec,
+                ..
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$7\r\ndiscard\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Discard,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_exec_discard_wrong_arity_is_invalid() {
+        let s = RespSerializer;
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$5\r\nMULTI\r\n$3\r\nkey\r\n"),
+            DecodeOutcome::Invalid {
+                message: "MULTI arity"
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$4\r\nEXEC\r\n$3\r\nkey\r\n"),
+            DecodeOutcome::Invalid {
+                message: "EXEC arity"
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$7\r\nDISCARD\r\n$3\r\nkey\r\n"),
+            DecodeOutcome::Invalid {
+                message: "DISCARD arity"
+            }
+        ));
+    }
+
+    #[test]
+    fn encode_queued_and_array_exec_results() {
+        let s = RespSerializer;
+        assert_eq!(s.encode(&Response::Queued), b"+QUEUED\r\n");
+        assert_eq!(s.encode(&Response::Array(vec![])), b"*0\r\n");
+        assert_eq!(
+            s.encode(&Response::Array(vec![
+                Response::Empty,
+                Response::Value(Some(b"v".to_vec())),
+                Response::Integer(1),
+            ])),
+            b"*3\r\n+OK\r\n$1\r\nv\r\n:1\r\n"
+        );
+    }
+
+    #[test]
+    fn decode_multi_set_exec_kernel_roundtrip() {
+        let s = RespSerializer;
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+
+        let DecodeOutcome::Ok {
+            command: multi, ..
+        } = s.decode_one(MULTI_FIXTURE)
+        else {
+            panic!("multi decode");
+        };
+        assert_eq!(s.encode(&kernel.execute(&multi)), b"+OK\r\n");
+
+        let DecodeOutcome::Ok {
+            command: set_cmd, ..
+        } = s.decode_one(SET_FIXTURE)
+        else {
+            panic!("set decode");
+        };
+        assert_eq!(s.encode(&kernel.execute(&set_cmd)), b"+QUEUED\r\n");
+
+        let DecodeOutcome::Ok {
+            command: exec, ..
+        } = s.decode_one(EXEC_FIXTURE)
+        else {
+            panic!("exec decode");
+        };
+        assert_eq!(
+            s.encode(&kernel.execute(&exec)),
+            b"*1\r\n+OK\r\n"
+        );
+
+        let DecodeOutcome::Ok {
+            command: get_cmd, ..
+        } = s.decode_one(GET_FIXTURE)
+        else {
+            panic!("get decode");
+        };
+        assert_eq!(s.encode(&kernel.execute(&get_cmd)), b"$5\r\nvalue\r\n");
     }
 
     #[test]

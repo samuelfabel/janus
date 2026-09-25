@@ -1,0 +1,37 @@
+name: restore-kernel-once
+on:
+  push:
+    paths:
+      - "src/kernel/_restore/TRIGGER"
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assemble and commit kernel.rs
+        env:
+          BRANCH: feat/f9-01-kernel-multi
+        run: |
+          set -euo pipefail
+          git checkout "$BRANCH"
+          cat src/kernel/_restore/p0.inc src/kernel/_restore/p1.inc src/kernel/_restore/p2.inc \
+              src/kernel/_restore/p3.inc src/kernel/_restore/p4.inc src/kernel/_restore/p5.inc \
+              src/kernel/_restore/p6.inc src/kernel/_restore/p7.inc src/kernel/_restore/p8.inc \
+              > src/kernel/kernel.rs
+          test "$(wc -c < src/kernel/kernel.rs)" -eq 39011
+          grep -q 'fn multi_set_set_exec_get_hits' src/kernel/kernel.rs
+          grep -q 'fn shared_arc_mutex_last_write_wins' src/kernel/kernel.rs
+          grep -q 'fn set_expire_with_wal_grows_file_and_replay_get_ttl' src/kernel/kernel.rs
+          rm -rf src/kernel/_restore
+          rm -f .github/workflows/restore-kernel-once.yml
+          rm -f src/kernel/.restore_probe_5k.txt src/kernel/_RESTORE_README.txt || true
+          git config user.name "Samuel Fabel"
+          git config user.email "samuelfabel@hotmail.com"
+          git add -A
+          git status
+          git commit -m "fix(f9-01): restore full Kernel with MULTI queue and prior tests"
+          git push origin "HEAD:$BRANCH"

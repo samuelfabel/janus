@@ -1,0 +1,36 @@
+name: restore-kernel-once
+on:
+  push:
+    paths:
+      - "src/kernel/_restore/TRIGGER"
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assemble and commit kernel.rs
+        env:
+          BRANCH: feat/f10-01-kernel-metrics
+        run: |
+          set -euo pipefail
+          git checkout "$BRANCH"
+          cat src/kernel/_restore/p0.inc src/kernel/_restore/p1.inc src/kernel/_restore/p2.inc src/kernel/_restore/p3.inc src/kernel/_restore/p4.inc src/kernel/_restore/p5.inc src/kernel/_restore/p6.inc src/kernel/_restore/p7.inc src/kernel/_restore/p8.inc src/kernel/_restore/p9.inc > src/kernel/kernel.rs
+          test "$(wc -c < src/kernel/kernel.rs)" -eq 43253
+          python3 -c "c=open('src/kernel/kernel.rs').read(); assert len(c)==43249; import hashlib; assert hashlib.sha256(c.encode()).hexdigest()=='5b54f0ac2beff3691fdb055e487053edee0d62a4822273d5ae86a1306921e9db'"
+          grep -q 'fn info_reports_set_get_hit_and_miss_counters' src/kernel/kernel.rs
+          grep -q 'fn shared_arc_mutex_last_write_wins' src/kernel/kernel.rs
+          grep -q 'keyspace_hits' src/kernel/kernel.rs
+          rm -rf src/kernel/_restore
+          rm -f .github/workflows/restore-kernel-once.yml
+          git config user.name "Samuel Fabel"
+          git config user.email "samuelfabel@hotmail.com"
+          git add -A
+          git status
+          MSG_FILE=$(mktemp)
+          printf '%s\n' 'feat(f10-01): add Kernel metrics counters and Info command' '' 'Track total_commands, keyspace_hits, and keyspace_misses on the Kernel.' 'Command::Info returns a Stats text payload via Response::Value. MULTI' 'queued commands count only when Exec applies them.' > "$MSG_FILE"
+          git commit -F "$MSG_FILE"
+          git push origin "HEAD:$BRANCH"

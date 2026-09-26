@@ -1,1 +1,1 @@
-PLACEHOLDER_LOAD_FROM_FILE
+@/tmp/f1002_file_0.content

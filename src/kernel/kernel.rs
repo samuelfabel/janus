@@ -33,6 +33,7 @@ enum QueuedCommand {
     Expire { key: Vec<u8>, seconds: u64 },
     Ttl { key: Vec<u8> },
     Save,
+    Info,
 }
 
 impl QueuedCommand {
@@ -56,6 +57,7 @@ impl QueuedCommand {
                 key: key.to_vec(),
             },
             Command::Save => QueuedCommand::Save,
+            Command::Info => QueuedCommand::Info,
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control commands are not queued")
             }
@@ -94,6 +96,12 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// After [`Command::Multi`], subsequent domain commands are queued until
 /// [`Command::Exec`] (apply in order) or [`Command::Discard`] (abort). Nested
 /// `MULTI` is rejected.
+///
+/// Pedagogical metrics (`total_commands`, `keyspace_hits`, `keyspace_misses`)
+/// live on the Kernel under the same `Mutex` as shared access. Commands that
+/// only enqueue during MULTI do **not** increment `total_commands`; they count
+/// when applied by Exec. [`Command::Info`] returns a text payload via
+/// [`Response::Value`].
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     store: Option<Box<dyn SnapshotStore>>,
@@ -101,6 +109,9 @@ pub struct Kernel {
     replication: Option<Box<dyn ReplicationSink>>,
     in_multi: bool,
     multi_queue: Vec<QueuedCommand>,
+    total_commands: u64,
+    keyspace_hits: u64,
+    keyspace_misses: u64,
 }
 
 impl Kernel {
@@ -118,6 +129,9 @@ impl Kernel {
             replication: None,
             in_multi: false,
             multi_queue: Vec::new(),
+            total_commands: 0,
+            keyspace_hits: 0,
+            keyspace_misses: 0,
         }
     }
 
@@ -141,6 +155,9 @@ impl Kernel {
             replication: None,
             in_multi: false,
             multi_queue: Vec::new(),
+            total_commands: 0,
+            keyspace_hits: 0,
+            keyspace_misses: 0,
         }
     }
 
@@ -158,6 +175,9 @@ impl Kernel {
             replication: None,
             in_multi: false,
             multi_queue: Vec::new(),
+            total_commands: 0,
+            keyspace_hits: 0,
+            keyspace_misses: 0,
         }
     }
 
@@ -181,6 +201,9 @@ impl Kernel {
             replication: Some(sink),
             in_multi: false,
             multi_queue: Vec::new(),
+            total_commands: 0,
+            keyspace_hits: 0,
+            keyspace_misses: 0,
         }
     }
 
@@ -195,6 +218,7 @@ impl Kernel {
     pub fn execute(&mut self, command: &Command<'_>) -> Response {
         match command {
             Command::Multi => {
+                self.total_commands = self.total_commands.saturating_add(1);
                 if self.in_multi {
                     return Response::Error(ERR_MULTI_NESTED.to_string());
                 }
@@ -203,6 +227,7 @@ impl Kernel {
                 Response::Empty
             }
             Command::Exec => {
+                self.total_commands = self.total_commands.saturating_add(1);
                 if !self.in_multi {
                     return Response::Error(ERR_EXEC_WITHOUT_MULTI.to_string());
                 }
@@ -215,6 +240,7 @@ impl Kernel {
                 Response::Array(results)
             }
             Command::Discard => {
+                self.total_commands = self.total_commands.saturating_add(1);
                 if !self.in_multi {
                     return Response::Error(ERR_DISCARD_WITHOUT_MULTI.to_string());
                 }
@@ -223,6 +249,7 @@ impl Kernel {
                 Response::Empty
             }
             other if self.in_multi => {
+                // Queued commands do not bump total_commands until Exec applies them.
                 self.multi_queue.push(QueuedCommand::from_command(other));
                 Response::Queued
             }
@@ -250,10 +277,12 @@ impl Kernel {
                 self.execute_immediate(&Command::Ttl { key: key.as_slice() })
             }
             QueuedCommand::Save => self.execute_immediate(&Command::Save),
+            QueuedCommand::Info => self.execute_immediate(&Command::Info),
         }
     }
 
     fn execute_immediate(&mut self, command: &Command<'_>) -> Response {
+        self.total_commands = self.total_commands.saturating_add(1);
         match command {
             Command::Set { key, value } => {
                 self.storage.set(key, value);
@@ -272,7 +301,13 @@ impl Kernel {
                 Response::Empty
             }
             Command::Get { key } => {
-                Response::Value(self.storage.get(key).map(|v| v.to_vec()))
+                let value = self.storage.get(key).map(|v| v.to_vec());
+                if value.is_some() {
+                    self.keyspace_hits = self.keyspace_hits.saturating_add(1);
+                } else {
+                    self.keyspace_misses = self.keyspace_misses.saturating_add(1);
+                }
+                Response::Value(value)
             }
             Command::Delete { key } => {
                 let deleted = self.storage.delete(key);
@@ -322,10 +357,23 @@ impl Kernel {
                 Response::Integer(code)
             }
             Command::Save => self.save(),
+            Command::Info => Response::Value(Some(self.format_info())),
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control handled in execute")
             }
         }
+    }
+
+    /// Stable ASCII metrics payload for [`Command::Info`].
+    fn format_info(&self) -> Vec<u8> {
+        format!(
+            "# Stats\n\
+             total_commands:{}\n\
+             keyspace_hits:{}\n\
+             keyspace_misses:{}\n",
+            self.total_commands, self.keyspace_hits, self.keyspace_misses
+        )
+        .into_bytes()
     }
 
     fn append_wal(&mut self, record: &WalRecord) -> Result<(), ()> {
@@ -1172,5 +1220,70 @@ mod tests {
         let mut kernel = Kernel::new(MemoryStorageEngine::new());
         assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
         assert_eq!(kernel.execute(&Command::Exec), Response::Array(vec![]));
+    }
+
+    #[test]
+    fn info_reports_set_get_hit_and_miss_counters() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"missing" }),
+            Response::Value(None)
+        );
+
+        let info = kernel.execute(&Command::Info);
+        let Response::Value(Some(payload)) = info else {
+            panic!("expected Value payload, got {info:?}");
+        };
+        let text = String::from_utf8(payload).expect("utf8");
+        // SET + GET hit + GET miss + Info = 4
+        assert!(
+            text.contains("total_commands:4"),
+            "unexpected total in {text}"
+        );
+        assert!(text.contains("keyspace_hits:1"), "unexpected hits in {text}");
+        assert!(
+            text.contains("keyspace_misses:1"),
+            "unexpected misses in {text}"
+        );
+        assert!(text.starts_with("# Stats\n"), "missing section header");
+    }
+
+    #[test]
+    fn multi_queued_commands_count_only_on_exec_apply() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty); // +1
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Queued
+        ); // no total bump
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Array(vec![Response::Empty])
+        ); // +1 Exec +1 applied Set
+
+        let info = kernel.execute(&Command::Info); // +1
+        let Response::Value(Some(payload)) = info else {
+            panic!("expected Value payload, got {info:?}");
+        };
+        let text = String::from_utf8(payload).expect("utf8");
+        // Multi + Exec + applied Set + Info = 4
+        assert!(
+            text.contains("total_commands:4"),
+            "unexpected total in {text}"
+        );
     }
 }

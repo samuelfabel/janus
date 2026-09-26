@@ -24,4 +24,6 @@ pub enum Command<'a> {
     Exec,
     /// Abort the transaction and clear the queue without applying.
     Discard,
+    /// Return pedagogical server metrics (counters) as a text payload.
+    Info,
 }

@@ -1,1 +1,1 @@
-PLACEHOLDER_LOAD_FROM_FILE
+file:///tmp/janus-f1001/src/kernel/kernel.rs

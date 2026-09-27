@@ -1,0 +1,28 @@
+name: one-shot f1003 e2e restore
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/f1003-e2e-restore.yml'
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/f10-03-info-e2e
+      - name: Concatenate parts into e2e_tests.rs
+        run: |
+          set -euo pipefail
+          cat .f1003-restore/e2e.p0 .f1003-restore/e2e.p1 .f1003-restore/e2e.p2 > src/transport/tcp/e2e_tests.rs
+          wc -c src/transport/tcp/e2e_tests.rs
+          grep -q e2e_info_reports_hit_and_miss_counters src/transport/tcp/e2e_tests.rs
+          rm -rf .f1003-restore
+          rm -f .github/workflows/f1003-e2e-restore.yml
+          git config user.name "Samuel Fabel"
+          git config user.email "samuelfabel@hotmail.com"
+          git add -A
+          git commit -m "feat(f10-03): add INFO e2e harness and README metrics notes"
+          git push origin HEAD:feat/f10-03-info-e2e

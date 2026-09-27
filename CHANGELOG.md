@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- RESP decode for `INFO` (arity 1) with fixtures; Info response encodes as bulk string
 - Kernel pedagogical metrics (`total_commands`, `keyspace_hits`, `keyspace_misses`) and `Command::Info` text payload (`Response::Value`)
 - TCP e2e for `MULTI` / `EXEC` / `DISCARD` and README transactions notes (pedagogical queue; no WATCH/ACID)
 - RESP decode for `MULTI` / `EXEC` / `DISCARD` (arity 1) with fixtures for Queued / Array encode

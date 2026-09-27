@@ -120,8 +120,23 @@ fn parse_resp_integer(line: &[u8]) -> i64 {
         .expect("integer")
 }
 
+/// Read one RESP bulk string (`$len\r\n…\r\n`); returns payload bytes (no framing).
+fn read_bulk_payload(stream: &mut TcpStream) -> Vec<u8> {
+    let header = read_crlf_line(stream);
+    assert!(header.starts_with(b"$"), "expected bulk header, got {header:?}");
+    let len: usize = std::str::from_utf8(&header[1..header.len() - 2])
+        .expect("utf8")
+        .parse()
+        .expect("bulk len");
+    let payload = read_exact(stream, len);
+    assert_eq!(read_exact(stream, 2), b"\r\n");
+    payload
+}
+
 const SET_KEY_VALUE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
 const GET_KEY: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+const GET_MISSING: &[u8] = b"*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n";
+const INFO: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
 const EXPIRE_KEY_2: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n2\r\n";
 const EXPIRE_KEY_1: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n1\r\n";
 const EXPIRE_KEY_30: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n30\r\n";
@@ -502,4 +517,41 @@ async fn e2e_multi_discard_does_not_apply() {
 
     client.write_all(GET_KEY).unwrap();
     assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+}
+
+/// V10-SCOPE: SET → GET hit → GET miss → INFO counters coherent.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_info_reports_hit_and_miss_counters() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+
+    client.write_all(GET_MISSING).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+
+    client.write_all(INFO).unwrap();
+    let payload = read_bulk_payload(&mut client);
+    let text = String::from_utf8(payload).expect("utf8 info");
+    // SET + GET hit + GET miss + INFO = 4
+    assert!(
+        text.contains("total_commands:4"),
+        "unexpected total in {text}"
+    );
+    assert!(
+        text.contains("keyspace_hits:1"),
+        "unexpected hits in {text}"
+    );
+    assert!(
+        text.contains("keyspace_misses:1"),
+        "unexpected misses in {text}"
+    );
+    assert!(
+        text.starts_with("# Stats\n"),
+        "missing section header in {text}"
+    );
 }

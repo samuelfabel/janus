@@ -10,7 +10,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 ## Overview
 
 - Layered design: transport, protocol, serializer, kernel, storage
-- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD`)
+- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO`)
 - Modular storage: `StorageEngine` trait + `Box<dyn StorageEngine>` in the Kernel (dependency inversion)
 - Default plugin: `MemoryStorageEngine` (`HashMap`); pedagogical second plugin: `BTreeStorageEngine` (`BTreeMap`)
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
@@ -18,6 +18,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
 - Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
 - Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
+- Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
 
 This project does **not**:
 
@@ -26,14 +27,17 @@ This project does **not**:
 - Bundle every Redis command or clustered topology on day one
 - Run a multi-node cluster or consensus protocol in the default server binary
 - Provide WATCH, Lua scripting, or full ACID transactions
+- Export Prometheus / OpenTelemetry metrics or distributed tracing
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
 **Replication (Phase 10, pedagogical):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). Covered by the harness under `src/replication/harness.rs` — not a production cluster, Raft, failover, or sharding.
 
 **Transactions (pedagogical):** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. Covered by the Tokio TCP e2e harness — not WATCH, nested MULTI, or distributed transactions.
+
+**Metrics (pedagogical):** the Kernel tracks `total_commands`, `keyspace_hits`, and `keyspace_misses`. `INFO` returns a `# Stats` text bulk string with those counters. Covered by the Tokio TCP e2e harness — not Prometheus, OpenTelemetry, histograms, or tracing.
 
 ## Install / build
 

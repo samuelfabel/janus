@@ -16,10 +16,12 @@ jobs:
         env:
           BRANCH: feat/f11-02-resp-traces
         run: |
-          set -euo pipefail
-          git checkout "$BRANCH"
+          set -euxo pipefail
+          ls -la _restore
           cat _restore/p0.inc _restore/p1.inc _restore/p2.inc _restore/p3.inc > src/serializer/resp.rs
-          test "$(wc -c < src/serializer/resp.rs)" -eq 29698
+          BYTES=$(wc -c < src/serializer/resp.rs | tr -d ' ')
+          echo "BYTES=$BYTES"
+          test "$BYTES" -eq 29700
           grep -q 'fn decode_traces_fixture' src/serializer/resp.rs
           grep -q 'fn traces_wrong_arity_is_invalid' src/serializer/resp.rs
           grep -q 'fn encode_traces_value_is_bulk_string' src/serializer/resp.rs

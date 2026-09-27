@@ -18,7 +18,7 @@ jobs:
         run: |
           set -euo pipefail
           git checkout "$BRANCH"
-          cat src/kernel/_restore/p0.inc src/kernel/_restore/p1.inc src/kernel/_restore/p2.inc src/kernel/_restore/p3.inc src/kernel/_restore/p4.inc > src/kernel/kernel.rs
+          cat src/kernel/_restore/p0.inc src/kernel/_restore/p1.inc src/kernel/_restore/p2.inc src/kernel/_restore/p3.inc src/kernel/_restore/p4.inc src/kernel/_restore/p5.inc src/kernel/_restore/p6.inc > src/kernel/kernel.rs
           test "$(wc -c < src/kernel/kernel.rs)" -eq 49164
           python3 -c "c=open('src/kernel/kernel.rs').read(); assert len(c)==49158; import hashlib; assert hashlib.sha256(c.encode()).hexdigest()=='7a21a6ee10b4e99733540a2ffa948eda60f4e1e6deee6d3388467d3cc21b433d'"
           grep -q 'fn traces_reports_set_get_spans_in_order' src/kernel/kernel.rs

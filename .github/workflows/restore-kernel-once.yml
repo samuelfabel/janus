@@ -34,12 +34,6 @@ jobs:
           git add -A
           git status
           MSG_FILE=$(mktemp)
-          cat > "$MSG_FILE" <<'EOF'
-feat(f11-01): add Kernel span ring buffer and Traces command
-
-Record pedagogical spans on applied commands (MULTI queue spans only
-on Exec apply). Command::Traces returns a # Traces text payload via
-Response::Value. Capacity 64 drops oldest entries.
-EOF
+          printf '%s\n' 'feat(f11-01): add Kernel span ring buffer and Traces command' '' 'Record pedagogical spans on applied commands (MULTI queue spans only' 'on Exec apply). Command::Traces returns a # Traces text payload via' 'Response::Value. Capacity 64 drops oldest entries.' > "$MSG_FILE"
           git commit -F "$MSG_FILE"
           git push origin "HEAD:$BRANCH"

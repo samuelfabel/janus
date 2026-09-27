@@ -1,0 +1,182 @@
+
+    restored.write_all(TTL_KEY).unwrap();
+    let ttl = parse_resp_integer(&read_crlf_line(&mut restored));
+    assert!(ttl > 0, "ttl={ttl}");
+
+    let _ = std::fs::remove_file(&wal);
+}
+
+/// V4-SCOPE: SET → DEL → recovery → GET miss.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_wal_recovery_delete() {
+    let wal = temp_wal("delete");
+    let addr1 = start_server_with_wal(Some(wal.clone())).await;
+    let mut client = connect(&addr1);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(DEL_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 4), b":1\r\n");
+    drop(client);
+
+    let addr2 = start_server_with_wal(Some(wal.clone())).await;
+    let mut restored = connect(&addr2);
+    restored.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut restored, 5), b"$-1\r\n");
+
+    let _ = std::fs::remove_file(&wal);
+}
+
+/// V5-SCOPE: client A SET → client B GET on the same server → hit.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_two_clients_set_get_shared_store() {
+    let addr = start_server().await;
+    let barrier = Arc::new(Barrier::new(2));
+
+    let addr_a = addr.clone();
+    let barrier_a = Arc::clone(&barrier);
+    let a = thread::spawn(move || {
+        let mut client = connect(&addr_a);
+        client.write_all(SET_KEY_VALUE).unwrap();
+        assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+        barrier_a.wait();
+    });
+
+    let addr_b = addr.clone();
+    let barrier_b = Arc::clone(&barrier);
+    let b = thread::spawn(move || {
+        barrier_b.wait();
+        let mut client = connect(&addr_b);
+        client.write_all(GET_KEY).unwrap();
+        assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+    });
+
+    a.join().expect("client A");
+    b.join().expect("client B");
+}
+
+/// V5-SCOPE: two clients interleave SET/GET on distinct keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_two_clients_interleaved_distinct_keys() {
+    let addr = start_server().await;
+    let mut handles = Vec::new();
+    for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
+        let addr = addr.clone();
+        handles.push(thread::spawn(move || {
+            let set = format!(
+                "*3\r\n$3\r\nSET\r\n$1\r\n{}\r\n$1\r\n{}\r\n",
+                std::str::from_utf8(key).unwrap(),
+                std::str::from_utf8(value).unwrap()
+            );
+            let get = format!(
+                "*2\r\n$3\r\nGET\r\n$1\r\n{}\r\n",
+                std::str::from_utf8(key).unwrap()
+            );
+            let expected = format!("$1\r\n{}\r\n", std::str::from_utf8(value).unwrap());
+            let mut client = connect(&addr);
+            for _ in 0..25 {
+                client.write_all(set.as_bytes()).unwrap();
+                assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+                client.write_all(get.as_bytes()).unwrap();
+                assert_eq!(
+                    read_exact(&mut client, expected.len()),
+                    expected.as_bytes()
+                );
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("client");
+    }
+}
+
+const MULTI: &[u8] = b"*1\r\n$5\r\nMULTI\r\n";
+const EXEC: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
+const DISCARD: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
+
+/// V9-SCOPE: MULTI → SET a → SET b → EXEC → GET both hit.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_multi_exec_get_hits() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    let set_a = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
+    let set_b = b"*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$1\r\n2\r\n";
+    let get_a = b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
+    let get_b = b"*2\r\n$3\r\nGET\r\n$1\r\nb\r\n";
+
+    client.write_all(MULTI).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(set_a).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(set_b).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(EXEC).unwrap();
+    assert_eq!(read_exact(&mut client, 14), b"*2\r\n+OK\r\n+OK\r\n");
+
+    client.write_all(get_a).unwrap();
+    assert_eq!(read_exact(&mut client, 7), b"$1\r\n1\r\n");
+
+    client.write_all(get_b).unwrap();
+    assert_eq!(read_exact(&mut client, 7), b"$1\r\n2\r\n");
+}
+
+/// V9-SCOPE: MULTI → SET → DISCARD → GET miss (queue not applied).
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_multi_discard_does_not_apply() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(MULTI).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 9), b"+QUEUED\r\n");
+
+    client.write_all(DISCARD).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+}
+
+/// V10-SCOPE: SET → GET hit → GET miss → INFO counters coherent.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_info_reports_hit_and_miss_counters() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+
+    client.write_all(GET_MISSING).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+
+    client.write_all(INFO).unwrap();
+    let payload = read_bulk_payload(&mut client);
+    let text = String::from_utf8(payload).expect("utf8 info");
+    // SET + GET hit + GET miss + INFO = 4
+    assert!(
+        text.contains("total_commands:4"),
+        "unexpected total in {text}"
+    );
+    assert!(
+        text.contains("keyspace_hits:1"),
+        "unexpected hits in {text}"
+    );
+    assert!(
+        text.contains("keyspace_misses:1"),
+        "unexpected misses in {text}"
+    );
+    assert!(
+        text.starts_with("# Stats\n"),
+        "missing section header in {text}"
+    );
+}

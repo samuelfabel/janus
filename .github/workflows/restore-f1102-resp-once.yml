@@ -1,0 +1,36 @@
+name: restore-f1102-resp-once
+on:
+  push:
+    paths:
+      - "_restore/TRIGGER"
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assemble resp.rs and cleanup
+        env:
+          BRANCH: feat/f11-02-resp-traces
+        run: |
+          set -euo pipefail
+          git checkout "$BRANCH"
+          cat _restore/p0.inc _restore/p1.inc _restore/p2.inc _restore/p3.inc > src/serializer/resp.rs
+          test "$(wc -c < src/serializer/resp.rs)" -eq 29698
+          grep -q 'fn decode_traces_fixture' src/serializer/resp.rs
+          grep -q 'fn traces_wrong_arity_is_invalid' src/serializer/resp.rs
+          grep -q 'fn encode_traces_value_is_bulk_string' src/serializer/resp.rs
+          grep -q 'fn decode_traces_kernel_roundtrip_contains_spans' src/serializer/resp.rs
+          grep -q 'Command::Traces' src/serializer/resp.rs
+          rm -rf _restore
+          rm -f _f1102_probe.txt
+          rm -f .github/workflows/restore-f1102-resp-once.yml
+          git config user.name "Samuel Fabel"
+          git config user.email "samuelfabel@hotmail.com"
+          git add -A
+          git status
+          git commit -m "feat(f11-02): decode RESP TRACES and encode Traces bulk response"
+          git push origin "HEAD:$BRANCH"

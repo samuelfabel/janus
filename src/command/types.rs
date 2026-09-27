@@ -26,4 +26,6 @@ pub enum Command<'a> {
     Discard,
     /// Return pedagogical server metrics (counters) as a text payload.
     Info,
+    /// Return pedagogical recent command spans as a text payload.
+    Traces,
 }

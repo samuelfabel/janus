@@ -1,6 +1,7 @@
 //! Kernel: map domain [`Command`](crate::command::types::Command) to
 //! [`Response`](crate::response::types::Response) via a [`StorageEngine`].
 
+use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -34,6 +35,7 @@ enum QueuedCommand {
     Ttl { key: Vec<u8> },
     Save,
     Info,
+    Traces,
 }
 
 impl QueuedCommand {
@@ -58,10 +60,27 @@ impl QueuedCommand {
             },
             Command::Save => QueuedCommand::Save,
             Command::Info => QueuedCommand::Info,
+            Command::Traces => QueuedCommand::Traces,
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control commands are not queued")
             }
         }
+    }
+}
+
+fn command_span_name(command: &Command<'_>) -> &'static str {
+    match command {
+        Command::Set { .. } => "SET",
+        Command::Get { .. } => "GET",
+        Command::Delete { .. } => "DELETE",
+        Command::Expire { .. } => "EXPIRE",
+        Command::Ttl { .. } => "TTL",
+        Command::Save => "SAVE",
+        Command::Multi => "MULTI",
+        Command::Exec => "EXEC",
+        Command::Discard => "DISCARD",
+        Command::Info => "INFO",
+        Command::Traces => "TRACES",
     }
 }
 
@@ -102,6 +121,11 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// only enqueue during MULTI do **not** increment `total_commands`; they count
 /// when applied by Exec. [`Command::Info`] returns a text payload via
 /// [`Response::Value`].
+///
+/// Pedagogical tracing uses a fixed-capacity ring buffer of spans (`id` +
+/// command name). Queued MULTI commands do **not** record a span until Exec
+/// applies them. [`Command::Traces`] returns a `# Traces` text payload via
+/// [`Response::Value`].
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     store: Option<Box<dyn SnapshotStore>>,
@@ -112,7 +136,18 @@ pub struct Kernel {
     total_commands: u64,
     keyspace_hits: u64,
     keyspace_misses: u64,
+    next_span_id: u64,
+    spans: VecDeque<TraceSpan>,
 }
+
+/// One pedagogical span: monotonic id + stable ASCII command name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceSpan {
+    id: u64,
+    cmd: &'static str,
+}
+
+const TRACE_CAPACITY: usize = 64;
 
 impl Kernel {
     /// Creates a kernel bound to `storage` with persistence disabled.
@@ -132,6 +167,8 @@ impl Kernel {
             total_commands: 0,
             keyspace_hits: 0,
             keyspace_misses: 0,
+            next_span_id: 0,
+            spans: VecDeque::new(),
         }
     }
 
@@ -158,6 +195,8 @@ impl Kernel {
             total_commands: 0,
             keyspace_hits: 0,
             keyspace_misses: 0,
+            next_span_id: 0,
+            spans: VecDeque::new(),
         }
     }
 
@@ -178,6 +217,8 @@ impl Kernel {
             total_commands: 0,
             keyspace_hits: 0,
             keyspace_misses: 0,
+            next_span_id: 0,
+            spans: VecDeque::new(),
         }
     }
 
@@ -204,6 +245,8 @@ impl Kernel {
             total_commands: 0,
             keyspace_hits: 0,
             keyspace_misses: 0,
+            next_span_id: 0,
+            spans: VecDeque::new(),
         }
     }
 
@@ -219,6 +262,7 @@ impl Kernel {
         match command {
             Command::Multi => {
                 self.total_commands = self.total_commands.saturating_add(1);
+                self.record_span("MULTI");
                 if self.in_multi {
                     return Response::Error(ERR_MULTI_NESTED.to_string());
                 }
@@ -228,6 +272,7 @@ impl Kernel {
             }
             Command::Exec => {
                 self.total_commands = self.total_commands.saturating_add(1);
+                self.record_span("EXEC");
                 if !self.in_multi {
                     return Response::Error(ERR_EXEC_WITHOUT_MULTI.to_string());
                 }
@@ -241,6 +286,7 @@ impl Kernel {
             }
             Command::Discard => {
                 self.total_commands = self.total_commands.saturating_add(1);
+                self.record_span("DISCARD");
                 if !self.in_multi {
                     return Response::Error(ERR_DISCARD_WITHOUT_MULTI.to_string());
                 }
@@ -278,11 +324,13 @@ impl Kernel {
             }
             QueuedCommand::Save => self.execute_immediate(&Command::Save),
             QueuedCommand::Info => self.execute_immediate(&Command::Info),
+            QueuedCommand::Traces => self.execute_immediate(&Command::Traces),
         }
     }
 
     fn execute_immediate(&mut self, command: &Command<'_>) -> Response {
         self.total_commands = self.total_commands.saturating_add(1);
+        self.record_span(command_span_name(command));
         match command {
             Command::Set { key, value } => {
                 self.storage.set(key, value);
@@ -358,6 +406,7 @@ impl Kernel {
             }
             Command::Save => self.save(),
             Command::Info => Response::Value(Some(self.format_info())),
+            Command::Traces => Response::Value(Some(self.format_traces())),
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control handled in execute")
             }
@@ -374,6 +423,26 @@ impl Kernel {
             self.total_commands, self.keyspace_hits, self.keyspace_misses
         )
         .into_bytes()
+    }
+
+    /// Stable ASCII span dump for [`Command::Traces`] (`# Traces` + `id cmd` lines).
+    fn format_traces(&self) -> Vec<u8> {
+        let mut out = String::from("# Traces\n");
+        for span in &self.spans {
+            out.push_str(&format!("{} {}\n", span.id, span.cmd));
+        }
+        out.into_bytes()
+    }
+
+    fn record_span(&mut self, cmd: &'static str) {
+        self.next_span_id = self.next_span_id.saturating_add(1);
+        if self.spans.len() == TRACE_CAPACITY {
+            self.spans.pop_front();
+        }
+        self.spans.push_back(TraceSpan {
+            id: self.next_span_id,
+            cmd,
+        });
     }
 
     fn append_wal(&mut self, record: &WalRecord) -> Result<(), ()> {
@@ -1285,5 +1354,97 @@ mod tests {
             text.contains("total_commands:4"),
             "unexpected total in {text}"
         );
+    }
+
+    #[test]
+    fn traces_reports_set_get_spans_in_order() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+
+        let traces = kernel.execute(&Command::Traces);
+        let Response::Value(Some(payload)) = traces else {
+            panic!("expected Value payload, got {traces:?}");
+        };
+        let text = String::from_utf8(payload).expect("utf8");
+        assert!(text.starts_with("# Traces\n"), "missing section header in {text}");
+        assert!(text.contains("1 SET\n"), "missing SET span in {text}");
+        assert!(text.contains("2 GET\n"), "missing GET span in {text}");
+        assert!(text.contains("3 TRACES\n"), "missing TRACES span in {text}");
+    }
+
+    #[test]
+    fn multi_queued_commands_span_only_on_exec_apply() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Queued
+        ); // no SET span while queued
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Array(vec![Response::Empty])
+        );
+
+        let traces = kernel.execute(&Command::Traces);
+        let Response::Value(Some(payload)) = traces else {
+            panic!("expected Value payload, got {traces:?}");
+        };
+        let text = String::from_utf8(payload).expect("utf8");
+        // MULTI, EXEC, applied SET, TRACES — no extra SET between MULTI and EXEC
+        assert_eq!(
+            text,
+            "# Traces\n1 MULTI\n2 EXEC\n3 SET\n4 TRACES\n",
+            "unexpected spans in {text}"
+        );
+    }
+
+    #[test]
+    fn traces_ring_buffer_drops_oldest_on_overflow() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        for i in 0..(TRACE_CAPACITY + 1) {
+            let key = format!("k{i}");
+            kernel.execute(&Command::Set {
+                key: key.as_bytes(),
+                value: VALUE,
+            });
+        }
+        // After 65 SETs the buffer holds ids 2..=65. TRACES (id 66) drops id 2.
+        let traces = kernel.execute(&Command::Traces);
+        let Response::Value(Some(payload)) = traces else {
+            panic!("expected Value payload, got {traces:?}");
+        };
+        let text = String::from_utf8(payload).expect("utf8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "# Traces");
+        assert!(!lines.iter().any(|l| *l == "1 SET"), "oldest dropped: {text}");
+        assert!(!lines.iter().any(|l| *l == "2 SET"), "id 2 dropped by TRACES: {text}");
+        assert!(lines.iter().any(|l| *l == "3 SET"), "expected id 3: {text}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| *l == format!("{} SET", TRACE_CAPACITY + 1)),
+            "expected newest SET: {text}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| *l == format!("{} TRACES", TRACE_CAPACITY + 2)),
+            "expected TRACES: {text}"
+        );
+        let span_lines = lines.iter().skip(1).filter(|l| !l.is_empty()).count();
+        assert_eq!(span_lines, TRACE_CAPACITY);
     }
 }

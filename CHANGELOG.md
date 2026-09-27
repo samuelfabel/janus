@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- RESP decode for `TRACES` (arity 1) with fixtures; Traces response encodes as bulk string
 - Kernel pedagogical trace ring buffer (capacity 64) and `Command::Traces` text payload (`Response::Value`)
 - TCP e2e for `INFO` counters after SET/GET hit/miss and README metrics notes (pedagogical; no Prometheus/OTLP)
 - RESP decode for `INFO` (arity 1) with fixtures; Info response encodes as bulk string

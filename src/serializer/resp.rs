@@ -1,5 +1,5 @@
 //! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
-//! MULTI / EXEC / DISCARD / INFO.
+//! MULTI / EXEC / DISCARD / INFO / TRACES.
 
 use crate::{
     command::types::Command,
@@ -275,6 +275,17 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"TRACES" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "TRACES arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Traces,
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -354,6 +365,7 @@ mod tests {
     const EXEC_FIXTURE: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
     const DISCARD_FIXTURE: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
     const INFO_FIXTURE: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
+    const TRACES_FIXTURE: &[u8] = b"*1\r\n$6\r\nTRACES\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -649,6 +661,91 @@ mod tests {
         assert!(body.contains("total_commands:"), "{body}");
         assert!(body.contains("keyspace_hits:1"), "{body}");
         assert!(body.contains("# Stats\n") || body.contains("# Stats\r\n"), "{body}");
+    }
+
+    #[test]
+    fn decode_traces_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(TRACES_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Traces,
+                consumed,
+            } => assert_eq!(consumed, TRACES_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$6\r\ntraces\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Traces,
+                ..
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$6\r\nTraces\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Traces,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn traces_wrong_arity_is_invalid() {
+        let s = RespSerializer;
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$6\r\nTRACES\r\n$3\r\nall\r\n"),
+            DecodeOutcome::Invalid {
+                message: "TRACES arity"
+            }
+        ));
+    }
+
+    #[test]
+    fn encode_traces_value_is_bulk_string() {
+        let s = RespSerializer;
+        let payload = b"# Traces\n1 SET\n2 GET\n";
+        let encoded = s.encode(&Response::Value(Some(payload.to_vec())));
+        let mut expected = Vec::new();
+        expected.extend_from_slice(format!("${}\r\n", payload.len()).as_bytes());
+        expected.extend_from_slice(payload);
+        expected.extend_from_slice(b"\r\n");
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn decode_traces_kernel_roundtrip_contains_spans() {
+        let s = RespSerializer;
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+
+        let DecodeOutcome::Ok {
+            command: set_cmd, ..
+        } = s.decode_one(SET_FIXTURE)
+        else {
+            panic!("set decode");
+        };
+        assert_eq!(s.encode(&kernel.execute(&set_cmd)), b"+OK\r\n");
+
+        let DecodeOutcome::Ok {
+            command: get_cmd, ..
+        } = s.decode_one(GET_FIXTURE)
+        else {
+            panic!("get decode");
+        };
+        assert_eq!(s.encode(&kernel.execute(&get_cmd)), b"$5\r\nvalue\r\n");
+
+        let DecodeOutcome::Ok {
+            command: traces_cmd, ..
+        } = s.decode_one(TRACES_FIXTURE)
+        else {
+            panic!("traces decode");
+        };
+        let encoded = s.encode(&kernel.execute(&traces_cmd));
+        assert!(encoded.starts_with(b"$"), "expected bulk string, got {encoded:?}");
+        let body = String::from_utf8_lossy(&encoded);
+        assert!(body.contains("# Traces\n") || body.contains("# Traces\r\n"), "{body}");
+        assert!(body.contains("SET"), "{body}");
+        assert!(body.contains("GET"), "{body}");
+        assert!(body.contains("TRACES"), "{body}");
     }
 
     #[test]

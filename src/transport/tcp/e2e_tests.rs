@@ -1,1 +1,1 @@
-LOAD_FROM_FILE:/tmp/e2e_only.rs
+data:text/plain;base64,dGVzdA==

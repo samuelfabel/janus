@@ -137,6 +137,7 @@ const SET_KEY_VALUE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
 const GET_KEY: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
 const GET_MISSING: &[u8] = b"*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n";
 const INFO: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
+const TRACES: &[u8] = b"*1\r\n$6\r\nTRACES\r\n";
 const EXPIRE_KEY_2: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n2\r\n";
 const EXPIRE_KEY_1: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n1\r\n";
 const EXPIRE_KEY_30: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$2\r\n30\r\n";
@@ -553,5 +554,39 @@ async fn e2e_info_reports_hit_and_miss_counters() {
     assert!(
         text.starts_with("# Stats\n"),
         "missing section header in {text}"
+    );
+}
+
+/// V11-SCOPE: SET → GET → TRACES spans in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_traces_reports_set_get_spans() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+
+    client.write_all(TRACES).unwrap();
+    let payload = read_bulk_payload(&mut client);
+    let text = String::from_utf8(payload).expect("utf8 traces");
+    assert!(
+        text.starts_with("# Traces\n"),
+        "missing section header in {text}"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.iter().any(|l| *l == "1 SET"),
+        "missing SET span in {text}"
+    );
+    assert!(
+        lines.iter().any(|l| *l == "2 GET"),
+        "missing GET span in {text}"
+    );
+    assert!(
+        lines.iter().any(|l| *l == "3 TRACES"),
+        "missing TRACES span in {text}"
     );
 }

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- RESP decode for `AUTH <password>` (arity 2; `AUTH username password` rejected as invalid arity) with fixtures; Auth responses encode as `+OK` / `-ERR …`
 - Kernel optional `requirepass` (`with_requirepass`, `auth_required`) and `Command::Auth` with stable errors (invalid password, no password configured, rejected inside MULTI)
 - TCP e2e for `TRACES` spans after SET/GET and README tracing notes (pedagogical; no OTLP/W3C)
 - RESP decode for `TRACES` (arity 1) with fixtures; Traces response encodes as bulk string

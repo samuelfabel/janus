@@ -1,5 +1,5 @@
 //! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
-//! MULTI / EXEC / DISCARD / INFO / TRACES.
+//! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH.
 
 use crate::{
     command::types::Command,
@@ -286,6 +286,27 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"AUTH" => {
+                // Password only; the `AUTH username password` form (arity 3) is not supported.
+                if arg_count != 2 {
+                    return DecodeOutcome::Invalid {
+                        message: "AUTH arity",
+                    };
+                }
+                let password = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid AUTH password",
+                        }
+                    }
+                };
+                DecodeOutcome::Ok {
+                    command: Command::Auth { password },
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -366,6 +387,7 @@ mod tests {
     const DISCARD_FIXTURE: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
     const INFO_FIXTURE: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
     const TRACES_FIXTURE: &[u8] = b"*1\r\n$6\r\nTRACES\r\n";
+    const AUTH_FIXTURE: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -892,5 +914,100 @@ mod tests {
         };
         let get_resp = kernel.execute(&get_cmd);
         assert_eq!(s.encode(&get_resp), b"$5\r\nvalue\r\n");
+    }
+
+    #[test]
+    fn decode_auth_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(AUTH_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::Auth { password },
+                consumed,
+            } => {
+                assert_eq!(password, b"s3cret");
+                assert_eq!(consumed, AUTH_FIXTURE.len());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$4\r\nauth\r\n$1\r\nx\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Auth { password: b"x" },
+                ..
+            }
+        ));
+        assert!(matches!(
+            s.decode_one(b"*2\r\n$4\r\nAuth\r\n$0\r\n\r\n"),
+            DecodeOutcome::Ok {
+                command: Command::Auth { password: b"" },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn auth_wrong_arity_is_invalid() {
+        let s = RespSerializer;
+        assert!(matches!(
+            s.decode_one(b"*1\r\n$4\r\nAUTH\r\n"),
+            DecodeOutcome::Invalid {
+                message: "AUTH arity"
+            }
+        ));
+        // `AUTH username password` (ACL form) is rejected in this phase.
+        assert!(matches!(
+            s.decode_one(b"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$6\r\ns3cret\r\n"),
+            DecodeOutcome::Invalid {
+                message: "AUTH arity"
+            }
+        ));
+    }
+
+    #[test]
+    fn truncated_auth_is_incomplete() {
+        let s = RespSerializer;
+        let partial = &AUTH_FIXTURE[..AUTH_FIXTURE.len() - 3];
+        assert_eq!(s.decode_one(partial), DecodeOutcome::Incomplete);
+    }
+
+    #[test]
+    fn encode_auth_responses() {
+        let s = RespSerializer;
+        assert_eq!(s.encode(&Response::Empty), b"+OK\r\n");
+        assert_eq!(
+            s.encode(&Response::Error("ERR invalid password".into())),
+            b"-ERR invalid password\r\n"
+        );
+        assert_eq!(
+            s.encode(&Response::Error(
+                "ERR AUTH called without any password configured".into()
+            )),
+            b"-ERR AUTH called without any password configured\r\n"
+        );
+    }
+
+    #[test]
+    fn decode_auth_kernel_roundtrip() {
+        let s = RespSerializer;
+        let decode = |input: &'static [u8]| match s.decode_one(input) {
+            DecodeOutcome::Ok { command, .. } => command,
+            other => panic!("unexpected {other:?}"),
+        };
+
+        let mut open = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            s.encode(&open.execute(&decode(AUTH_FIXTURE))),
+            b"-ERR AUTH called without any password configured\r\n"
+        );
+
+        let mut protected = Kernel::new(MemoryStorageEngine::new()).with_requirepass("s3cret");
+        assert_eq!(
+            s.encode(&protected.execute(&decode(b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n"))),
+            b"-ERR invalid password\r\n"
+        );
+        assert_eq!(
+            s.encode(&protected.execute(&decode(AUTH_FIXTURE))),
+            b"+OK\r\n"
+        );
     }
 }

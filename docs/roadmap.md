@@ -249,6 +249,7 @@ stable.
 - Encryption
 - Observability
 - Benchmark suite
+- HTTP/3 transport (QUIC)
 
 ---
 

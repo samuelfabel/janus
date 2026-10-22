@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -12,6 +12,7 @@ use std::{
 use tokio::net::TcpListener;
 
 use super::manager;
+use crate::{kernel::kernel::Kernel, storage::memory::MemoryStorageEngine};
 
 async fn start_server() -> String {
     start_server_with_dbfile(None).await
@@ -35,6 +36,18 @@ async fn start_server_with_persistence(
         let _ = manager::serve(listener, dbfile, wal).await;
     });
     // Brief yield so accept is ready
+    tokio::task::yield_now().await;
+    std::thread::sleep(Duration::from_millis(20));
+    addr
+}
+
+async fn start_server_with_requirepass(password: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr").to_string();
+    let kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(password);
+    tokio::spawn(async move {
+        let _ = manager::accept_loop_with_kernel(listener, Arc::new(Mutex::new(kernel))).await;
+    });
     tokio::task::yield_now().await;
     std::thread::sleep(Duration::from_millis(20));
     addr
@@ -589,4 +602,67 @@ async fn e2e_traces_reports_set_get_spans() {
         lines.iter().any(|l| *l == "3 TRACES"),
         "missing TRACES span in {text}"
     );
+}
+
+const AUTH_OK: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
+const AUTH_WRONG: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n";
+const NOAUTH: &[u8] = b"-NOAUTH Authentication required.\r\n";
+const ERR_INVALID_PASSWORD: &[u8] = b"-ERR invalid password\r\n";
+
+/// V12-SCOPE: requirepass → GET NOAUTH → AUTH wrong ERR → AUTH ok → GET/SET work.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_auth_gates_until_password_matches() {
+    let addr = start_server_with_requirepass("s3cret").await;
+    let mut client = connect(&addr);
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, NOAUTH.len()), NOAUTH);
+
+    client.write_all(AUTH_WRONG).unwrap();
+    assert_eq!(
+        read_exact(&mut client, ERR_INVALID_PASSWORD.len()),
+        ERR_INVALID_PASSWORD
+    );
+
+    client.write_all(AUTH_OK).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"$-1\r\n");
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    client.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut client, 11), b"$5\r\nvalue\r\n");
+}
+
+/// V12-SCOPE: authentication is per connection, not global.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_auth_is_per_connection() {
+    let addr = start_server_with_requirepass("s3cret").await;
+    let mut first = connect(&addr);
+    let mut second = connect(&addr);
+
+    first.write_all(AUTH_OK).unwrap();
+    assert_eq!(read_exact(&mut first, 5), b"+OK\r\n");
+    first.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut first, 5), b"+OK\r\n");
+
+    second.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut second, NOAUTH.len()), NOAUTH);
+}
+
+/// V12-SCOPE: without requirepass the server stays open; AUTH → ERR.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_auth_without_requirepass_is_error() {
+    let addr = start_server().await;
+    let mut client = connect(&addr);
+
+    client.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");
+
+    let expected: &[u8] = b"-ERR AUTH called without any password configured\r\n";
+    client.write_all(AUTH_OK).unwrap();
+    assert_eq!(read_exact(&mut client, expected.len()), expected);
 }

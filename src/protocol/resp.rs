@@ -2,22 +2,32 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    command::types::Command,
     kernel::kernel::{Kernel, lock_kernel},
     protocol::{Protocol, ProtocolError},
+    response::types::Response,
     serializer::{DecodeOutcome, Serializer},
 };
+
+const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
 
 /// RESP protocol instance bound to a kernel and serializer.
 ///
 /// Multi-connection servers use [`RespProtocol::shared`] with one
 /// process-wide `Arc<Mutex<Kernel>>`. [`RespProtocol::new`] wraps a
 /// private mutex for single-connection / unit fixtures.
+///
+/// Authentication state is per instance (one per connection). While the
+/// Kernel requires a password and this connection has not authenticated, only
+/// `AUTH` reaches the Kernel; every other command gets [`ERR_NOAUTH`]. A
+/// successful `AUTH` marks the connection authenticated for its lifetime.
 pub struct RespProtocol<S>
 where
     S: Serializer,
 {
     kernel: Arc<Mutex<Kernel>>,
     serializer: S,
+    authenticated: bool,
 }
 
 impl<S> RespProtocol<S>
@@ -26,16 +36,30 @@ where
 {
     /// Wrap `kernel` in a private mutex (single-connection / tests).
     pub fn new(kernel: Kernel, serializer: S) -> Self {
-        RespProtocol {
-            kernel: Arc::new(Mutex::new(kernel)),
-            serializer,
-        }
+        Self::shared(Arc::new(Mutex::new(kernel)), serializer)
     }
 
     /// Canonical multi-connection path: share one process-wide kernel mutex.
     pub fn shared(kernel: Arc<Mutex<Kernel>>, serializer: S) -> Self {
-        RespProtocol { kernel, serializer }
+        RespProtocol {
+            kernel,
+            serializer,
+            authenticated: false,
+        }
     }
+}
+
+/// Run `command` on the locked kernel, applying the per-connection AUTH gate.
+fn execute_gated(kernel: &mut Kernel, authenticated: &mut bool, command: &Command<'_>) -> Response {
+    let is_auth = matches!(command, Command::Auth { .. });
+    if kernel.auth_required() && !*authenticated && !is_auth {
+        return Response::Error(ERR_NOAUTH.to_string());
+    }
+    let response = kernel.execute(command);
+    if is_auth && response == Response::Empty {
+        *authenticated = true;
+    }
+    response
 }
 
 impl<S> Protocol for RespProtocol<S>
@@ -65,7 +89,7 @@ where
                 DecodeOutcome::Ok { command, consumed } => {
                     let response = {
                         let mut kernel = lock_kernel(&self.kernel);
-                        kernel.execute(&command)
+                        execute_gated(&mut kernel, &mut self.authenticated, &command)
                     };
                     let encoded = self.serializer.encode(&response);
                     callback(&encoded);
@@ -338,5 +362,70 @@ mod tests {
         for h in handles {
             h.join().expect("worker");
         }
+    }
+
+    const AUTH_OK: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
+    const AUTH_WRONG: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n";
+    const NOAUTH: &[u8] = b"-NOAUTH Authentication required.\r\n";
+
+    fn protected_kernel() -> Kernel {
+        Kernel::new(MemoryStorageEngine::new()).with_requirepass("s3cret")
+    }
+
+    fn run(p: &mut RespProtocol<RespSerializer>, input: &[u8]) -> Vec<Vec<u8>> {
+        let mut responses = Vec::new();
+        let offset = p.execute(input, |out| responses.push(out.to_vec())).unwrap();
+        assert_eq!(offset, input.len());
+        responses
+    }
+
+    #[test]
+    fn requirepass_gates_until_auth_succeeds() {
+        let mut p = RespProtocol::new(protected_kernel(), RespSerializer);
+        assert_eq!(run(&mut p, GET_A), vec![NOAUTH.to_vec()]);
+        assert_eq!(run(&mut p, SET_A), vec![NOAUTH.to_vec()]);
+        assert_eq!(
+            run(&mut p, AUTH_WRONG),
+            vec![b"-ERR invalid password\r\n".to_vec()]
+        );
+        assert_eq!(run(&mut p, GET_A), vec![NOAUTH.to_vec()]);
+        assert_eq!(run(&mut p, AUTH_OK), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, GET_A), vec![b"$-1\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn gate_applies_per_command_within_one_buffer() {
+        let mut p = RespProtocol::new(protected_kernel(), RespSerializer);
+        let mut buf = GET_A.to_vec();
+        buf.extend_from_slice(AUTH_OK);
+        buf.extend_from_slice(GET_A);
+        assert_eq!(
+            run(&mut p, &buf),
+            vec![NOAUTH.to_vec(), b"+OK\r\n".to_vec(), b"$-1\r\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn authentication_is_per_connection() {
+        let kernel = Arc::new(Mutex::new(protected_kernel()));
+        let mut first = RespProtocol::shared(Arc::clone(&kernel), RespSerializer);
+        let mut second = RespProtocol::shared(kernel, RespSerializer);
+
+        assert_eq!(run(&mut first, AUTH_OK), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut first, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut second, GET_A), vec![NOAUTH.to_vec()]);
+    }
+
+    #[test]
+    fn without_requirepass_commands_are_not_gated() {
+        let mut p = protocol();
+        assert_eq!(run(&mut p, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(
+            run(&mut p, AUTH_OK),
+            vec![b"-ERR AUTH called without any password configured\r\n".to_vec()]
+        );
+        assert_eq!(run(&mut p, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
     }
 }

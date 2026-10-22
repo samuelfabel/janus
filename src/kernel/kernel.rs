@@ -24,6 +24,9 @@ const ERR_REPLICATION_FAILED: &str = "ERR replication failed";
 const ERR_MULTI_NESTED: &str = "ERR MULTI calls can not be nested";
 const ERR_EXEC_WITHOUT_MULTI: &str = "ERR EXEC without MULTI";
 const ERR_DISCARD_WITHOUT_MULTI: &str = "ERR DISCARD without MULTI";
+const ERR_AUTH_INVALID_PASSWORD: &str = "ERR invalid password";
+const ERR_AUTH_NOT_CONFIGURED: &str = "ERR AUTH called without any password configured";
+const ERR_AUTH_IN_MULTI: &str = "ERR AUTH inside MULTI is not allowed";
 
 /// Owned domain command held in a MULTI queue (keys/values copied at enqueue).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +64,8 @@ impl QueuedCommand {
             Command::Save => QueuedCommand::Save,
             Command::Info => QueuedCommand::Info,
             Command::Traces => QueuedCommand::Traces,
-            Command::Multi | Command::Exec | Command::Discard => {
-                unreachable!("transaction control commands are not queued")
+            Command::Multi | Command::Exec | Command::Discard | Command::Auth { .. } => {
+                unreachable!("transaction control and AUTH are not queued")
             }
         }
     }
@@ -81,6 +84,7 @@ fn command_span_name(command: &Command<'_>) -> &'static str {
         Command::Discard => "DISCARD",
         Command::Info => "INFO",
         Command::Traces => "TRACES",
+        Command::Auth { .. } => "AUTH",
     }
 }
 
@@ -126,8 +130,15 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// command name). Queued MULTI commands do **not** record a span until Exec
 /// applies them. [`Command::Traces`] returns a `# Traces` text payload via
 /// [`Response::Value`].
+///
+/// An optional `requirepass` (see [`Kernel::with_requirepass`]) enables
+/// [`Command::Auth`] checks. The Kernel only validates passwords; whether a
+/// connection is authenticated is per-connection state owned by the Protocol
+/// Instance, which queries [`Kernel::auth_required`]. `AUTH` is never queued:
+/// inside MULTI it is rejected and the transaction stays open.
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
+    requirepass: Option<Vec<u8>>,
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
     replication: Option<Box<dyn ReplicationSink>>,
@@ -159,6 +170,7 @@ impl Kernel {
     pub fn from_boxed(storage: Box<dyn StorageEngine>) -> Self {
         Kernel {
             storage,
+            requirepass: None,
             store: None,
             wal: None,
             replication: None,
@@ -187,6 +199,7 @@ impl Kernel {
     ) -> Self {
         Kernel {
             storage,
+            requirepass: None,
             store: Some(store),
             wal: None,
             replication: None,
@@ -209,6 +222,7 @@ impl Kernel {
     pub fn from_boxed_with_wal(storage: Box<dyn StorageEngine>, wal: WalWriter) -> Self {
         Kernel {
             storage,
+            requirepass: None,
             store: None,
             wal: Some(wal),
             replication: None,
@@ -237,6 +251,7 @@ impl Kernel {
     ) -> Self {
         Kernel {
             storage,
+            requirepass: None,
             store: None,
             wal: None,
             replication: Some(sink),
@@ -248,6 +263,18 @@ impl Kernel {
             next_span_id: 0,
             spans: VecDeque::new(),
         }
+    }
+
+    /// Requires `password` for [`Command::Auth`]. Without this call the
+    /// Kernel has no requirepass and the server stays open (default).
+    pub fn with_requirepass(mut self, password: impl Into<Vec<u8>>) -> Self {
+        self.requirepass = Some(password.into());
+        self
+    }
+
+    /// `true` when a requirepass is configured and connections must AUTH first.
+    pub fn auth_required(&self) -> bool {
+        self.requirepass.is_some()
     }
 
     /// Mutable access to the bound storage (tests).
@@ -293,6 +320,11 @@ impl Kernel {
                 self.in_multi = false;
                 self.multi_queue.clear();
                 Response::Empty
+            }
+            Command::Auth { .. } if self.in_multi => {
+                self.total_commands = self.total_commands.saturating_add(1);
+                self.record_span("AUTH");
+                Response::Error(ERR_AUTH_IN_MULTI.to_string())
             }
             other if self.in_multi => {
                 // Queued commands do not bump total_commands until Exec applies them.
@@ -407,6 +439,7 @@ impl Kernel {
             Command::Save => self.save(),
             Command::Info => Response::Value(Some(self.format_info())),
             Command::Traces => Response::Value(Some(self.format_traces())),
+            Command::Auth { password } => self.auth(password),
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control handled in execute")
             }
@@ -457,6 +490,14 @@ impl Kernel {
             return Ok(());
         };
         sink.replicate(record)
+    }
+
+    fn auth(&self, password: &[u8]) -> Response {
+        match self.requirepass.as_deref() {
+            None => Response::Error(ERR_AUTH_NOT_CONFIGURED.to_string()),
+            Some(expected) if expected == password => Response::Empty,
+            Some(_) => Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string()),
+        }
     }
 
     fn save(&mut self) -> Response {
@@ -1446,5 +1487,71 @@ mod tests {
         );
         let span_lines = lines.iter().skip(1).filter(|l| !l.is_empty()).count();
         assert_eq!(span_lines, TRACE_CAPACITY);
+    }
+
+    const PASSWORD: &[u8] = b"s3cret";
+
+    #[test]
+    fn default_kernel_does_not_require_auth() {
+        let kernel = Kernel::new(MemoryStorageEngine::new());
+        assert!(!kernel.auth_required());
+    }
+
+    #[test]
+    fn with_requirepass_requires_auth() {
+        let kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(PASSWORD);
+        assert!(kernel.auth_required());
+    }
+
+    #[test]
+    fn auth_matching_password_returns_empty() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(PASSWORD);
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: PASSWORD }),
+            Response::Empty
+        );
+    }
+
+    #[test]
+    fn auth_wrong_password_returns_stable_error() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(PASSWORD);
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: b"wrong" }),
+            Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string())
+        );
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: b"" }),
+            Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string())
+        );
+    }
+
+    #[test]
+    fn auth_without_requirepass_returns_stable_error() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: PASSWORD }),
+            Response::Error(ERR_AUTH_NOT_CONFIGURED.to_string())
+        );
+    }
+
+    #[test]
+    fn auth_inside_multi_is_rejected_and_transaction_stays_open() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(PASSWORD);
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: PASSWORD }),
+            Response::Error(ERR_AUTH_IN_MULTI.to_string())
+        );
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Array(vec![Response::Empty])
+        );
     }
 }

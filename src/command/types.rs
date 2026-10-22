@@ -28,4 +28,6 @@ pub enum Command<'a> {
     Info,
     /// Return pedagogical recent command spans as a text payload.
     Traces,
+    /// Check `password` against the configured `requirepass` (opaque bytes).
+    Auth { password: &'a [u8] },
 }

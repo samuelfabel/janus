@@ -45,7 +45,8 @@ pub async fn serve(
     accept_loop_with_kernel(listener, kernel).await
 }
 
-async fn accept_loop_with_kernel(
+/// Accept forever with an injected kernel (e2e servers needing e.g. a requirepass).
+pub(crate) async fn accept_loop_with_kernel(
     listener: TcpListener,
     kernel: Arc<Mutex<Kernel>>,
 ) -> io::Result<()> {

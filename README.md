@@ -10,7 +10,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 ## Overview
 
 - Layered design: transport, protocol, serializer, kernel, storage
-- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES`)
+- First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH`)
 - Modular storage: `StorageEngine` trait + `Box<dyn StorageEngine>` in the Kernel (dependency inversion)
 - Default plugin: `MemoryStorageEngine` (`HashMap`); pedagogical second plugin: `BTreeStorageEngine` (`BTreeMap`)
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
@@ -20,6 +20,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
 - Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
 - Pedagogical **tracing**: Kernel span ring buffer inspected via `TRACES` (not OTLP / W3C Trace Context)
+- Pedagogical **authentication**: optional `requirepass` + `AUTH <password>` with a per-connection `NOAUTH` gate (no ACL / users / TLS)
 
 This project does **not**:
 
@@ -29,10 +30,11 @@ This project does **not**:
 - Run a multi-node cluster or consensus protocol in the default server binary
 - Provide WATCH, Lua scripting, or full ACID transactions
 - Export Prometheus / OpenTelemetry metrics or distributed tracing
+- Provide ACL / authorization, multiple users, or TLS
 
 ## Status
 
-TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
+TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
 **Replication (Phase 10, pedagogical):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). Covered by the harness under `src/replication/harness.rs` — not a production cluster, Raft, failover, or sharding.
 
@@ -41,6 +43,8 @@ TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI`
 **Metrics (pedagogical):** the Kernel tracks `total_commands`, `keyspace_hits`, and `keyspace_misses`. `INFO` returns a `# Stats` text bulk string with those counters. Covered by the Tokio TCP e2e harness — not Prometheus, OpenTelemetry, histograms, or tracing.
 
 **Tracing (pedagogical):** the Kernel keeps a fixed-capacity ring buffer of command spans (`id` + command name). `TRACES` returns a `# Traces` text bulk string with the recent sequence. Covered by the Tokio TCP e2e harness — not OpenTelemetry, OTLP, or W3C Trace Context.
+
+**Authentication (pedagogical):** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each connection starts unauthenticated and every command except `AUTH <password>` returns `-NOAUTH Authentication required.`; a matching `AUTH` returns `+OK` and unlocks that connection only, a wrong one returns `-ERR invalid password`. Without a requirepass the server stays open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected, never queued. The default `cargo run` server has **no** password; requirepass is set in the composition root and is covered by the Tokio TCP e2e harness — not ACL, multiple users, `AUTH username password`, or TLS.
 
 ## Install / build
 
@@ -90,7 +94,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, and the in-process primary→replica replication harness).
+Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, and the in-process primary→replica replication harness).
 
 ## Docker
 

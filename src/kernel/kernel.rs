@@ -88,6 +88,34 @@ fn command_span_name(command: &Command<'_>) -> &'static str {
     }
 }
 
+/// Permission level of an authenticated connection, chosen by the password used in AUTH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Authenticated with `requirepass`: every command is allowed.
+    Full,
+    /// Authenticated with the read-only password: write commands are denied.
+    ReadOnly,
+}
+
+/// `true` for commands that mutate the keyspace or persist it (`SET`, `DEL`,
+/// `EXPIRE`, `SAVE`). Reads, metrics, tracing, transaction control and `AUTH`
+/// are not writes.
+pub fn is_write(command: &Command<'_>) -> bool {
+    match command {
+        Command::Set { .. } | Command::Delete { .. } | Command::Expire { .. } | Command::Save => {
+            true
+        }
+        Command::Get { .. }
+        | Command::Ttl { .. }
+        | Command::Info
+        | Command::Traces
+        | Command::Multi
+        | Command::Exec
+        | Command::Discard
+        | Command::Auth { .. } => false,
+    }
+}
+
 /// Lock a shared kernel, recovering from poison via [`PoisonError::into_inner`](std::sync::PoisonError::into_inner).
 ///
 /// The domain [`Kernel`] is single-threaded. Process-wide sharing uses
@@ -136,9 +164,16 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// connection is authenticated is per-connection state owned by the Protocol
 /// Instance, which queries [`Kernel::auth_required`]. `AUTH` is never queued:
 /// inside MULTI it is rejected and the transaction stays open.
+///
+/// An optional read-only password (see [`Kernel::with_readonly_pass`]) is also
+/// accepted by `AUTH`; [`Kernel::role_for`] maps a password to its [`Role`]
+/// and [`is_write`] classifies commands so the Protocol Instance can deny
+/// writes on read-only connections. With only a read-only password set, every
+/// authenticated connection is read-only.
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     requirepass: Option<Vec<u8>>,
+    readonly_pass: Option<Vec<u8>>,
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
     replication: Option<Box<dyn ReplicationSink>>,
@@ -171,6 +206,7 @@ impl Kernel {
         Kernel {
             storage,
             requirepass: None,
+            readonly_pass: None,
             store: None,
             wal: None,
             replication: None,
@@ -200,6 +236,7 @@ impl Kernel {
         Kernel {
             storage,
             requirepass: None,
+            readonly_pass: None,
             store: Some(store),
             wal: None,
             replication: None,
@@ -223,6 +260,7 @@ impl Kernel {
         Kernel {
             storage,
             requirepass: None,
+            readonly_pass: None,
             store: None,
             wal: Some(wal),
             replication: None,
@@ -252,6 +290,7 @@ impl Kernel {
         Kernel {
             storage,
             requirepass: None,
+            readonly_pass: None,
             store: None,
             wal: None,
             replication: Some(sink),
@@ -272,9 +311,27 @@ impl Kernel {
         self
     }
 
-    /// `true` when a requirepass is configured and connections must AUTH first.
+    /// Accepts `password` in [`Command::Auth`] as a [`Role::ReadOnly`] login.
+    /// When it equals `requirepass`, [`Role::Full`] wins.
+    pub fn with_readonly_pass(mut self, password: impl Into<Vec<u8>>) -> Self {
+        self.readonly_pass = Some(password.into());
+        self
+    }
+
+    /// `true` when any password is configured and connections must AUTH first.
     pub fn auth_required(&self) -> bool {
-        self.requirepass.is_some()
+        self.requirepass.is_some() || self.readonly_pass.is_some()
+    }
+
+    /// Role granted by `password`, or `None` when it matches no configured password.
+    pub fn role_for(&self, password: &[u8]) -> Option<Role> {
+        if self.requirepass.as_deref() == Some(password) {
+            Some(Role::Full)
+        } else if self.readonly_pass.as_deref() == Some(password) {
+            Some(Role::ReadOnly)
+        } else {
+            None
+        }
     }
 
     /// Mutable access to the bound storage (tests).
@@ -493,10 +550,12 @@ impl Kernel {
     }
 
     fn auth(&self, password: &[u8]) -> Response {
-        match self.requirepass.as_deref() {
-            None => Response::Error(ERR_AUTH_NOT_CONFIGURED.to_string()),
-            Some(expected) if expected == password => Response::Empty,
-            Some(_) => Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string()),
+        if !self.auth_required() {
+            return Response::Error(ERR_AUTH_NOT_CONFIGURED.to_string());
+        }
+        match self.role_for(password) {
+            Some(_) => Response::Empty,
+            None => Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string()),
         }
     }
 
@@ -1553,5 +1612,106 @@ mod tests {
             kernel.execute(&Command::Exec),
             Response::Array(vec![Response::Empty])
         );
+    }
+
+    const READONLY_PASSWORD: &[u8] = b"r3ader";
+
+    fn kernel_with_roles() -> Kernel {
+        Kernel::new(MemoryStorageEngine::new())
+            .with_requirepass(PASSWORD)
+            .with_readonly_pass(READONLY_PASSWORD)
+    }
+
+    #[test]
+    fn role_for_maps_each_password_to_its_role() {
+        let kernel = kernel_with_roles();
+        assert_eq!(kernel.role_for(PASSWORD), Some(Role::Full));
+        assert_eq!(kernel.role_for(READONLY_PASSWORD), Some(Role::ReadOnly));
+        assert_eq!(kernel.role_for(b"wrong"), None);
+        assert_eq!(kernel.role_for(b""), None);
+    }
+
+    #[test]
+    fn role_for_without_passwords_is_none() {
+        let kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.role_for(PASSWORD), None);
+        assert!(!kernel.auth_required());
+    }
+
+    #[test]
+    fn equal_passwords_resolve_to_full() {
+        let kernel = Kernel::new(MemoryStorageEngine::new())
+            .with_requirepass(PASSWORD)
+            .with_readonly_pass(PASSWORD);
+        assert_eq!(kernel.role_for(PASSWORD), Some(Role::Full));
+    }
+
+    #[test]
+    fn readonly_pass_alone_requires_auth_and_grants_readonly() {
+        let mut kernel =
+            Kernel::new(MemoryStorageEngine::new()).with_readonly_pass(READONLY_PASSWORD);
+        assert!(kernel.auth_required());
+        assert_eq!(kernel.role_for(READONLY_PASSWORD), Some(Role::ReadOnly));
+        assert_eq!(
+            kernel.execute(&Command::Auth {
+                password: READONLY_PASSWORD
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: PASSWORD }),
+            Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string())
+        );
+    }
+
+    #[test]
+    fn auth_accepts_both_passwords_and_rejects_others() {
+        let mut kernel = kernel_with_roles();
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: PASSWORD }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Auth {
+                password: READONLY_PASSWORD
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Auth { password: b"wrong" }),
+            Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string())
+        );
+    }
+
+    #[test]
+    fn is_write_classifies_every_command() {
+        let writes = [
+            Command::Set {
+                key: KEY,
+                value: VALUE,
+            },
+            Command::Delete { key: KEY },
+            Command::Expire {
+                key: KEY,
+                seconds: 1,
+            },
+            Command::Save,
+        ];
+        let non_writes = [
+            Command::Get { key: KEY },
+            Command::Ttl { key: KEY },
+            Command::Info,
+            Command::Traces,
+            Command::Multi,
+            Command::Exec,
+            Command::Discard,
+            Command::Auth { password: PASSWORD },
+        ];
+        for command in &writes {
+            assert!(is_write(command), "{command:?} should be a write");
+        }
+        for command in &non_writes {
+            assert!(!is_write(command), "{command:?} should not be a write");
+        }
     }
 }

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Kernel optional read-only password (`with_readonly_pass`), `Role` (`Full` / `ReadOnly`) resolved by `role_for`, and `is_write` command classification (`SET` / `DEL` / `EXPIRE` / `SAVE`); `AUTH` accepts either password
 - Per-connection `NOAUTH` gate in the RESP protocol instance when a requirepass is set, TCP e2e for AUTH (blocked, wrong password, success, per-connection) and README authentication notes (pedagogical; no ACL / TLS; default server stays open)
 - RESP decode for `AUTH <password>` (arity 2; `AUTH username password` rejected as invalid arity) with fixtures; Auth responses encode as `+OK` / `-ERR …`
 - Kernel optional `requirepass` (`with_requirepass`, `auth_required`) and `Command::Auth` with stable errors (invalid password, no password configured, rejected inside MULTI)

@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     command::types::Command,
-    kernel::kernel::{Kernel, lock_kernel},
+    kernel::kernel::{Kernel, Role, is_write, lock_kernel},
     protocol::{Protocol, ProtocolError},
     response::types::Response,
     serializer::{DecodeOutcome, Serializer},
 };
 
 const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
+const ERR_NOPERM: &str = "NOPERM this connection is read-only";
 
 /// RESP protocol instance bound to a kernel and serializer.
 ///
@@ -17,17 +18,19 @@ const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
 /// process-wide `Arc<Mutex<Kernel>>`. [`RespProtocol::new`] wraps a
 /// private mutex for single-connection / unit fixtures.
 ///
-/// Authentication state is per instance (one per connection). While the
-/// Kernel requires a password and this connection has not authenticated, only
-/// `AUTH` reaches the Kernel; every other command gets [`ERR_NOAUTH`]. A
-/// successful `AUTH` marks the connection authenticated for its lifetime.
+/// The connection role is per instance (one per connection). While the
+/// Kernel requires a password and this connection has no role, only `AUTH`
+/// reaches the Kernel; every other command gets [`ERR_NOAUTH`]. A successful
+/// `AUTH` sets the role from the password used; a failed one keeps the current
+/// role. A [`Role::ReadOnly`] connection gets [`ERR_NOPERM`] for write
+/// commands, which never reach the Kernel (so they are not queued in `MULTI`).
 pub struct RespProtocol<S>
 where
     S: Serializer,
 {
     kernel: Arc<Mutex<Kernel>>,
     serializer: S,
-    authenticated: bool,
+    role: Option<Role>,
 }
 
 impl<S> RespProtocol<S>
@@ -44,20 +47,29 @@ where
         RespProtocol {
             kernel,
             serializer,
-            authenticated: false,
+            role: None,
         }
     }
 }
 
-/// Run `command` on the locked kernel, applying the per-connection AUTH gate.
-fn execute_gated(kernel: &mut Kernel, authenticated: &mut bool, command: &Command<'_>) -> Response {
-    let is_auth = matches!(command, Command::Auth { .. });
-    if kernel.auth_required() && !*authenticated && !is_auth {
-        return Response::Error(ERR_NOAUTH.to_string());
+/// Run `command` on the locked kernel, applying the per-connection gates:
+/// NOAUTH first, then NOPERM for writes on a read-only connection.
+fn execute_gated(kernel: &mut Kernel, role: &mut Option<Role>, command: &Command<'_>) -> Response {
+    if kernel.auth_required() {
+        match (*role, command) {
+            (None, Command::Auth { .. }) => {}
+            (None, _) => return Response::Error(ERR_NOAUTH.to_string()),
+            (Some(Role::ReadOnly), cmd) if is_write(cmd) => {
+                return Response::Error(ERR_NOPERM.to_string());
+            }
+            _ => {}
+        }
     }
     let response = kernel.execute(command);
-    if is_auth && response == Response::Empty {
-        *authenticated = true;
+    if let Command::Auth { password } = command {
+        if response == Response::Empty {
+            *role = kernel.role_for(password);
+        }
     }
     response
 }
@@ -89,7 +101,7 @@ where
                 DecodeOutcome::Ok { command, consumed } => {
                     let response = {
                         let mut kernel = lock_kernel(&self.kernel);
-                        execute_gated(&mut kernel, &mut self.authenticated, &command)
+                        execute_gated(&mut kernel, &mut self.role, &command)
                     };
                     let encoded = self.serializer.encode(&response);
                     callback(&encoded);
@@ -427,5 +439,121 @@ mod tests {
             vec![b"-ERR AUTH called without any password configured\r\n".to_vec()]
         );
         assert_eq!(run(&mut p, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
+    }
+
+    const AUTH_RO: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$4\r\nr3ad\r\n";
+    const NOPERM: &[u8] = b"-NOPERM this connection is read-only\r\n";
+    const DEL_A: &[u8] = b"*2\r\n$3\r\nDEL\r\n$1\r\na\r\n";
+    const EXPIRE_A: &[u8] = b"*3\r\n$6\r\nEXPIRE\r\n$1\r\na\r\n$2\r\n10\r\n";
+    const TTL_A: &[u8] = b"*2\r\n$3\r\nTTL\r\n$1\r\na\r\n";
+    const SAVE: &[u8] = b"*1\r\n$4\r\nSAVE\r\n";
+    const MULTI: &[u8] = b"*1\r\n$5\r\nMULTI\r\n";
+    const EXEC: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
+    const INFO: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
+    const TRACES: &[u8] = b"*1\r\n$6\r\nTRACES\r\n";
+
+    fn roles_kernel() -> Arc<Mutex<Kernel>> {
+        Arc::new(Mutex::new(protected_kernel().with_readonly_pass("r3ad")))
+    }
+
+    fn connect(kernel: &Arc<Mutex<Kernel>>, auth: &[u8]) -> RespProtocol<RespSerializer> {
+        let mut p = RespProtocol::shared(Arc::clone(kernel), RespSerializer);
+        assert_eq!(run(&mut p, auth), vec![b"+OK\r\n".to_vec()]);
+        p
+    }
+
+    #[test]
+    fn readonly_connection_reads_and_gets_noperm_on_writes() {
+        let kernel = roles_kernel();
+        let mut full = connect(&kernel, AUTH_OK);
+        assert_eq!(run(&mut full, SET_A), vec![b"+OK\r\n".to_vec()]);
+
+        let mut ro = connect(&kernel, AUTH_RO);
+        assert_eq!(run(&mut ro, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
+        assert_eq!(run(&mut ro, TTL_A), vec![b":-1\r\n".to_vec()]);
+        for write in [SET_B, DEL_A, EXPIRE_A, SAVE] {
+            assert_eq!(run(&mut ro, write), vec![NOPERM.to_vec()]);
+        }
+        assert_eq!(run(&mut ro, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
+        assert_eq!(run(&mut ro, TTL_A), vec![b":-1\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn full_connection_writes() {
+        let kernel = roles_kernel();
+        let mut full = connect(&kernel, AUTH_OK);
+        assert_eq!(run(&mut full, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut full, EXPIRE_A), vec![b":1\r\n".to_vec()]);
+        assert_eq!(run(&mut full, DEL_A), vec![b":1\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn denied_write_inside_multi_is_not_queued() {
+        let kernel = roles_kernel();
+        let mut full = connect(&kernel, AUTH_OK);
+        assert_eq!(run(&mut full, SET_A), vec![b"+OK\r\n".to_vec()]);
+
+        let mut ro = connect(&kernel, AUTH_RO);
+        assert_eq!(run(&mut ro, MULTI), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut ro, SET_B), vec![NOPERM.to_vec()]);
+        assert_eq!(run(&mut ro, GET_A), vec![b"+QUEUED\r\n".to_vec()]);
+        assert_eq!(run(&mut ro, EXEC), vec![b"*1\r\n$1\r\n1\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn roles_are_isolated_per_connection() {
+        let kernel = roles_kernel();
+        let mut ro = connect(&kernel, AUTH_RO);
+        let mut full = connect(&kernel, AUTH_OK);
+        let mut anonymous = RespProtocol::shared(Arc::clone(&kernel), RespSerializer);
+
+        assert_eq!(run(&mut ro, SET_A), vec![NOPERM.to_vec()]);
+        assert_eq!(run(&mut full, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut ro, GET_A), vec![b"$1\r\n1\r\n".to_vec()]);
+        assert_eq!(run(&mut anonymous, GET_A), vec![NOAUTH.to_vec()]);
+    }
+
+    #[test]
+    fn last_successful_auth_sets_the_role() {
+        let kernel = roles_kernel();
+        let mut p = connect(&kernel, AUTH_RO);
+        assert_eq!(run(&mut p, SET_A), vec![NOPERM.to_vec()]);
+        assert_eq!(
+            run(&mut p, AUTH_WRONG),
+            vec![b"-ERR invalid password\r\n".to_vec()]
+        );
+        assert_eq!(run(&mut p, SET_A), vec![NOPERM.to_vec()]);
+        assert_eq!(run(&mut p, AUTH_OK), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_A), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, AUTH_RO), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_B), vec![NOPERM.to_vec()]);
+    }
+
+    #[test]
+    fn readonly_pass_alone_requires_auth_and_grants_readonly() {
+        let kernel = Kernel::new(MemoryStorageEngine::new()).with_readonly_pass("r3ad");
+        let mut p = RespProtocol::new(kernel, RespSerializer);
+        assert_eq!(run(&mut p, GET_A), vec![NOAUTH.to_vec()]);
+        assert_eq!(run(&mut p, AUTH_RO), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, GET_A), vec![b"$-1\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_A), vec![NOPERM.to_vec()]);
+    }
+
+    #[test]
+    fn denied_writes_do_not_count_metrics_or_spans() {
+        let kernel = roles_kernel();
+        let mut full = connect(&kernel, AUTH_OK);
+        let mut ro = connect(&kernel, AUTH_RO);
+        assert_eq!(run(&mut ro, SET_A), vec![NOPERM.to_vec()]);
+        assert_eq!(run(&mut ro, DEL_A), vec![NOPERM.to_vec()]);
+
+        let info = run(&mut full, INFO).concat();
+        let info = String::from_utf8(info).unwrap();
+        assert!(info.contains("total_commands:3"), "unexpected INFO: {info}");
+
+        let traces = run(&mut full, TRACES).concat();
+        let traces = String::from_utf8(traces).unwrap();
+        assert!(!traces.contains("SET"), "unexpected TRACES: {traces}");
+        assert!(!traces.contains("DEL"), "unexpected TRACES: {traces}");
     }
 }

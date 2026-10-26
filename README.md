@@ -21,6 +21,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
 - Pedagogical **tracing**: Kernel span ring buffer inspected via `TRACES` (not OTLP / W3C Trace Context)
 - Pedagogical **authentication**: optional `requirepass` + `AUTH <password>` with a per-connection `NOAUTH` gate (no ACL / users / TLS)
+- Pedagogical **authorization**: `Full` / `ReadOnly` roles chosen by the password used in `AUTH`, with a per-connection `NOPERM` gate for writes (no ACL / users / TLS)
 
 This project does **not**:
 
@@ -30,7 +31,7 @@ This project does **not**:
 - Run a multi-node cluster or consensus protocol in the default server binary
 - Provide WATCH, Lua scripting, or full ACID transactions
 - Export Prometheus / OpenTelemetry metrics or distributed tracing
-- Provide ACL / authorization, multiple users, or TLS
+- Provide ACLs (per-command or per-key permissions), multiple users, or TLS
 
 ## Status
 
@@ -45,6 +46,8 @@ TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI`
 **Tracing (pedagogical):** the Kernel keeps a fixed-capacity ring buffer of command spans (`id` + command name). `TRACES` returns a `# Traces` text bulk string with the recent sequence. Covered by the Tokio TCP e2e harness — not OpenTelemetry, OTLP, or W3C Trace Context.
 
 **Authentication (pedagogical):** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each connection starts unauthenticated and every command except `AUTH <password>` returns `-NOAUTH Authentication required.`; a matching `AUTH` returns `+OK` and unlocks that connection only, a wrong one returns `-ERR invalid password`. Without a requirepass the server stays open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected, never queued. The default `cargo run` server has **no** password; requirepass is set in the composition root and is covered by the Tokio TCP e2e harness — not ACL, multiple users, `AUTH username password`, or TLS.
+
+**Authorization (pedagogical):** next to `requirepass` (role `Full`), the Kernel accepts an optional read-only password (`Kernel::with_readonly_pass`, role `ReadOnly`). The password used in the last successful `AUTH` sets the role of that connection; a failed `AUTH` keeps the current role. A `ReadOnly` connection can run reads (`GET`, `TTL`, `INFO`, `TRACES`) and transaction control, but write commands (`SET`, `DEL`, `EXPIRE`, `SAVE`) return `-NOPERM this connection is read-only` without reaching the Kernel: inside `MULTI` they are not queued, and they are not counted in `INFO` or recorded in `TRACES`. With only a read-only password configured, every authenticated connection is `ReadOnly`. Roles are per connection and covered by the Tokio TCP e2e harness; the default `cargo run` server has **no** passwords — not ACLs, named users, Redis command categories, or TLS.
 
 ## Install / build
 
@@ -94,7 +97,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, and the in-process primary→replica replication harness).
+Automated coverage lives in `cargo test` (Tokio TCP e2e harness on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, and the in-process primary→replica replication harness).
 
 ## Docker
 

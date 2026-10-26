@@ -42,9 +42,12 @@ async fn start_server_with_persistence(
 }
 
 async fn start_server_with_requirepass(password: &str) -> String {
+    start_server_with_kernel(Kernel::new(MemoryStorageEngine::new()).with_requirepass(password)).await
+}
+
+async fn start_server_with_kernel(kernel: Kernel) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
-    let kernel = Kernel::new(MemoryStorageEngine::new()).with_requirepass(password);
     tokio::spawn(async move {
         let _ = manager::accept_loop_with_kernel(listener, Arc::new(Mutex::new(kernel))).await;
     });
@@ -665,4 +668,73 @@ async fn e2e_auth_without_requirepass_is_error() {
     let expected: &[u8] = b"-ERR AUTH called without any password configured\r\n";
     client.write_all(AUTH_OK).unwrap();
     assert_eq!(read_exact(&mut client, expected.len()), expected);
+}
+
+const AUTH_FULL: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$4\r\nfull\r\n";
+const AUTH_RO: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$2\r\nro\r\n";
+const NOPERM: &[u8] = b"-NOPERM this connection is read-only\r\n";
+
+async fn start_server_with_roles() -> String {
+    start_server_with_kernel(
+        Kernel::new(MemoryStorageEngine::new())
+            .with_requirepass("full")
+            .with_readonly_pass("ro"),
+    )
+    .await
+}
+
+/// V13-SCOPE: read-only connection reads, writes get NOPERM (not queued in
+/// MULTI); a full connection writes and the read-only one sees the value.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_readonly_role_reads_and_gets_noperm_on_writes() {
+    let addr = start_server_with_roles().await;
+    let mut ro = connect(&addr);
+
+    ro.write_all(AUTH_RO).unwrap();
+    assert_eq!(read_exact(&mut ro, 5), b"+OK\r\n");
+    ro.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut ro, 5), b"$-1\r\n");
+    ro.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut ro, NOPERM.len()), NOPERM);
+
+    ro.write_all(MULTI).unwrap();
+    assert_eq!(read_exact(&mut ro, 5), b"+OK\r\n");
+    ro.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut ro, NOPERM.len()), NOPERM);
+    ro.write_all(EXEC).unwrap();
+    assert_eq!(read_exact(&mut ro, 4), b"*0\r\n");
+
+    let mut full = connect(&addr);
+    full.write_all(AUTH_FULL).unwrap();
+    assert_eq!(read_exact(&mut full, 5), b"+OK\r\n");
+    full.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut full, 5), b"+OK\r\n");
+
+    ro.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut ro, 11), b"$5\r\nvalue\r\n");
+}
+
+/// V13-SCOPE: roles are per connection on the same server.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_two_connections_with_different_roles() {
+    let addr = start_server_with_roles().await;
+    let mut full = connect(&addr);
+    let mut ro = connect(&addr);
+
+    full.write_all(AUTH_FULL).unwrap();
+    assert_eq!(read_exact(&mut full, 5), b"+OK\r\n");
+    ro.write_all(AUTH_RO).unwrap();
+    assert_eq!(read_exact(&mut ro, 5), b"+OK\r\n");
+
+    full.write_all(SET_KEY_VALUE).unwrap();
+    assert_eq!(read_exact(&mut full, 5), b"+OK\r\n");
+    ro.write_all(DEL_KEY).unwrap();
+    assert_eq!(read_exact(&mut ro, NOPERM.len()), NOPERM);
+    ro.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut ro, 11), b"$5\r\nvalue\r\n");
+
+    full.write_all(DEL_KEY).unwrap();
+    assert_eq!(read_exact(&mut full, 4), b":1\r\n");
+    ro.write_all(GET_KEY).unwrap();
+    assert_eq!(read_exact(&mut ro, 5), b"$-1\r\n");
 }

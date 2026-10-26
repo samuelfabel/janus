@@ -3,7 +3,7 @@
 use janus_storage::{BTreeStorageEngine, build_storage};
 use janus_types::{Command, Response};
 
-use crate::kernel::kernel::Kernel;
+use crate::Kernel;
 
 const KEY: &[u8] = b"key";
 const VALUE: &[u8] = b"value1";

@@ -4,8 +4,8 @@
 use janus_types::{Command, Response};
 
 use crate::{
-    serializer::{DecodeOutcome, Serializer},
-    shared::helpers::{count_digits, find_crlf, parse_integer},
+    framing::{count_digits, find_crlf, parse_integer},
+    DecodeOutcome, Serializer,
 };
 
 /// RESP serializer for the v1 command subset.
@@ -373,7 +373,7 @@ mod tests {
     use super::*;
     use janus_storage::memory::MemoryStorageEngine;
 
-    use crate::kernel::kernel::Kernel;
+    use janus_kernel::Kernel;
 
     const SET_FIXTURE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
     const GET_FIXTURE: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";

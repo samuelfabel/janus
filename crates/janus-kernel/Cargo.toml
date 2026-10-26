@@ -1,0 +1,11 @@
+[package]
+name = "janus-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command execution kernel and pedagogical replication for Janus"
+
+[dependencies]
+janus-types = { workspace = true }
+janus-storage = { workspace = true }

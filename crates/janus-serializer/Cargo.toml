@@ -1,0 +1,14 @@
+[package]
+name = "janus-serializer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RESP codec between bytes and Janus command / response types"
+
+[dependencies]
+janus-types = { workspace = true }
+
+[dev-dependencies]
+janus-kernel = { workspace = true }
+janus-storage = { workspace = true }

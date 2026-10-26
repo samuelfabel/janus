@@ -2,7 +2,10 @@
 
 use janus_types::{Command, Response};
 
+mod framing;
 pub mod resp;
+
+pub use resp::RespSerializer;
 
 /// Result of attempting to decode one RESP command frame from an input slice.
 #[derive(Debug, Clone, PartialEq, Eq)]

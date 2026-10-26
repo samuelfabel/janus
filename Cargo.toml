@@ -11,6 +11,9 @@ repository = "https://github.com/samuelfabel/janus"
 tokio = { version = "1.53.1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
 janus-types = { path = "crates/janus-types" }
 janus-storage = { path = "crates/janus-storage" }
+janus-kernel = { path = "crates/janus-kernel" }
+janus-serializer = { path = "crates/janus-serializer" }
+janus-protocol = { path = "crates/janus-protocol" }
 
 [package]
 name = "janus"
@@ -25,5 +28,7 @@ categories = ["database-implementations", "network-programming"]
 
 [dependencies]
 tokio = { workspace = true }
-janus-types = { workspace = true }
 janus-storage = { workspace = true }
+janus-kernel = { workspace = true }
+janus-serializer = { workspace = true }
+janus-protocol = { workspace = true }

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::storage::engine::StorageEngine;
+use crate::engine::StorageEngine;
 
 const MAGIC: &[u8; 8] = b"JANUSWAL";
 const VERSION: u32 = 1;
@@ -275,7 +275,7 @@ pub fn unix_now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{engine::Ttl, memory::MemoryStorageEngine};
+    use crate::{engine::Ttl, memory::MemoryStorageEngine};
     use std::path::PathBuf;
 
     const KEY: &[u8] = b"key";

@@ -1,9 +1,9 @@
 //! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
 //! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH.
 
+use janus_types::{Command, Response};
+
 use crate::{
-    command::types::Command,
-    response::types::Response,
     serializer::{DecodeOutcome, Serializer},
     shared::helpers::{count_digits, find_crlf, parse_integer},
 };
@@ -371,10 +371,9 @@ fn parse_u64_decimal(slice: &[u8]) -> Result<u64, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        command::types::Command, kernel::kernel::Kernel, response::types::Response,
-        storage::memory::MemoryStorageEngine,
-    };
+    use janus_storage::memory::MemoryStorageEngine;
+
+    use crate::kernel::kernel::Kernel;
 
     const SET_FIXTURE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
     const GET_FIXTURE: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";

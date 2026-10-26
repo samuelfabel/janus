@@ -1,14 +1,29 @@
-[package]
-name = "janus"
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A modular data kernel written in Rust"
 repository = "https://github.com/samuelfabel/janus"
+
+[workspace.dependencies]
+tokio = { version = "1.53.1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
+janus-types = { path = "crates/janus-types" }
+janus-storage = { path = "crates/janus-storage" }
+
+[package]
+name = "janus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A modular data kernel written in Rust"
 readme = "README.md"
 keywords = ["cache", "storage", "kernel", "resp"]
 categories = ["database-implementations", "network-programming"]
 
 [dependencies]
-tokio = { version = "1.53.1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
-
+tokio = { workspace = true }
+janus-types = { workspace = true }
+janus-storage = { workspace = true }

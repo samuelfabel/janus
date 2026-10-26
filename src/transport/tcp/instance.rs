@@ -74,9 +74,10 @@ impl<T: Protocol + Send + 'static> TcpInstance<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use janus_storage::memory::MemoryStorageEngine;
+
     use crate::{
         kernel::kernel::Kernel, protocol::resp::RespProtocol, serializer::resp::RespSerializer,
-        storage::memory::MemoryStorageEngine,
     };
     use tokio::net::TcpListener;
 

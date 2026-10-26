@@ -1,11 +1,11 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
 use std::sync::{Arc, Mutex};
 
+use janus_types::{Command, Response};
+
 use crate::{
-    command::types::Command,
     kernel::kernel::{Kernel, Role, is_write, lock_kernel},
     protocol::{Protocol, ProtocolError},
-    response::types::Response,
     serializer::{DecodeOutcome, Serializer},
 };
 
@@ -126,10 +126,9 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
-    use crate::{
-        kernel::kernel::Kernel, serializer::resp::RespSerializer,
-        storage::memory::MemoryStorageEngine,
-    };
+    use janus_storage::memory::MemoryStorageEngine;
+
+    use crate::{kernel::kernel::Kernel, serializer::resp::RespSerializer};
 
     fn protocol() -> RespProtocol<RespSerializer> {
         RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer)

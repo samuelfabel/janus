@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::storage::{
+use crate::{
     clock::{Clock, SystemClock},
     engine::{StorageEngine, Ttl},
     snapshot::SnapshotEntry,
@@ -191,7 +191,7 @@ impl<C: Clock> StorageEngine for MemoryStorageEngine<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{clock::FakeClock, engine::StorageEngine};
+    use crate::{clock::FakeClock, engine::StorageEngine};
 
     const KEY: &[u8] = b"key";
     const VALUE: &[u8] = b"value1";
@@ -379,7 +379,7 @@ mod tests {
         let mut engine = MemoryStorageEngine::new();
         engine.set(b"old", b"1");
         engine.set(KEY, VALUE);
-        let entries = vec![crate::storage::SnapshotEntry {
+        let entries = vec![crate::SnapshotEntry {
             key: KEY.to_vec(),
             value: VALUE2.to_vec(),
             ttl_secs: None,
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip_via_export() {
-        use crate::storage::snapshot::{decode, encode};
+        use crate::snapshot::{decode, encode};
 
         let mut src = MemoryStorageEngine::new();
         src.set(b"", b"");

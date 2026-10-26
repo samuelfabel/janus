@@ -7,12 +7,12 @@
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use janus_storage::memory::MemoryStorageEngine;
+    use janus_types::{Command, Response};
+
     use crate::{
-        command::types::Command,
         kernel::kernel::{apply_replication_record, Kernel},
         replication::{ReplicationRecord, ReplicationSink},
-        response::types::Response,
-        storage::memory::MemoryStorageEngine,
     };
 
     /// Sink that appends records into a shared queue drained by the replica.

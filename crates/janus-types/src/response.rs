@@ -1,6 +1,6 @@
 //! Domain responses — independent of RESP and transport.
 
-/// Result of executing a [`crate::command::types::Command`].
+/// Result of executing a [`crate::Command`].
 ///
 /// Variants carry domain meaning only. RESP encoding happens in the serializer.
 #[derive(Debug, Clone, PartialEq, Eq)]

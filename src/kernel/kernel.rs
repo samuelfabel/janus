@@ -1,21 +1,19 @@
-//! Kernel: map domain [`Command`](crate::command::types::Command) to
-//! [`Response`](crate::response::types::Response) via a [`StorageEngine`].
+//! Kernel: map domain [`Command`](janus_types::Command) to
+//! [`Response`](janus_types::Response) via a [`StorageEngine`].
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use crate::{
-    command::types::Command,
-    replication::{ReplicationRecord, ReplicationSink},
-    response::types::Response,
-    storage::{
-        engine::{StorageEngine, Ttl},
-        snapshot,
-        store::SnapshotStore,
-        wal::{WalRecord, WalWriter, unix_now_secs},
-    },
+use janus_storage::{
+    engine::{StorageEngine, Ttl},
+    snapshot,
+    store::SnapshotStore,
+    wal::{WalRecord, WalWriter, unix_now_secs},
 };
+use janus_types::{Command, Response};
+
+use crate::replication::{ReplicationRecord, ReplicationSink};
 
 const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
@@ -602,7 +600,7 @@ mod tests {
         thread,
     };
 
-    use crate::storage::{
+    use janus_storage::{
         clock::FakeClock,
         engine::Ttl,
         memory::MemoryStorageEngine,

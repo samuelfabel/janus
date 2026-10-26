@@ -4,6 +4,7 @@ FROM rust:1.83-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 COPY src ./src
 
 RUN cargo build --release

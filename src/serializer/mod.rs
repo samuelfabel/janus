@@ -1,6 +1,6 @@
 //! Serializer layer: bytes ↔ domain [`Command`] / [`Response`].
 
-use crate::{command::types::Command, response::types::Response};
+use janus_types::{Command, Response};
 
 pub mod resp;
 

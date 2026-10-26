@@ -6,8 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::storage::engine::StorageEngine;
-use crate::storage::snapshot::{self, SnapshotError};
+use crate::engine::StorageEngine;
+use crate::snapshot::{self, SnapshotError};
 
 /// Persists and loads raw snapshot bytes (path owned by the store, not by SAVE).
 pub trait SnapshotStore: Send {

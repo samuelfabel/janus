@@ -22,7 +22,7 @@ impl Clock for SystemClock {
 /// Test clock with a controllable instant.
 ///
 /// [`Clone`] shares the underlying instant so a handle kept outside a
-/// [`crate::storage::MemoryStorageEngine`] (or behind `Box<dyn StorageEngine>`)
+/// [`crate::MemoryStorageEngine`] (or behind `Box<dyn StorageEngine>`)
 /// can still [`Self::advance`] time.
 #[derive(Debug, Clone)]
 pub struct FakeClock {

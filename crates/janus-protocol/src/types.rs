@@ -1,4 +1,4 @@
-//! Protocol-layer error types for [`crate::protocol::Protocol::execute`].
+//! Protocol-layer error types for [`crate::Protocol::execute`].
 
 /// Fatal protocol outcome for the current connection (v1: caller closes).
 #[derive(Debug, Clone, PartialEq, Eq)]

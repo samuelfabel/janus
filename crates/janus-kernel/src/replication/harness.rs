@@ -11,8 +11,9 @@ mod tests {
     use janus_types::{Command, Response};
 
     use crate::{
-        kernel::kernel::{apply_replication_record, Kernel},
+        apply_replication_record,
         replication::{ReplicationRecord, ReplicationSink},
+        Kernel,
     };
 
     /// Sink that appends records into a shared queue drained by the replica.

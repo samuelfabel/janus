@@ -6,6 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use janus_kernel::Kernel;
+use janus_protocol::RespProtocol;
+use janus_serializer::RespSerializer;
 use janus_storage::{
     build_storage,
     store::{FileSnapshotStore, boot_load},
@@ -13,10 +16,7 @@ use janus_storage::{
 };
 use tokio::net::TcpListener;
 
-use crate::{
-    kernel::kernel::Kernel, protocol::resp::RespProtocol, serializer::resp::RespSerializer,
-    transport::tcp::instance::TcpInstance,
-};
+use crate::transport::tcp::instance::TcpInstance;
 
 /// Bind and accept forever (Tokio tasks per connection).
 ///

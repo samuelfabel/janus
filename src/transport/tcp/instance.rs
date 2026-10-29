@@ -5,7 +5,7 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::protocol::Protocol;
+use janus_protocol::Protocol;
 
 /// Per-connection transport state (bytes only; no RESP knowledge).
 pub struct TcpInstance<T: Protocol + Send + 'static> {
@@ -74,11 +74,10 @@ impl<T: Protocol + Send + 'static> TcpInstance<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use janus_kernel::Kernel;
+    use janus_protocol::RespProtocol;
+    use janus_serializer::RespSerializer;
     use janus_storage::memory::MemoryStorageEngine;
-
-    use crate::{
-        kernel::kernel::Kernel, protocol::resp::RespProtocol, serializer::resp::RespSerializer,
-    };
     use tokio::net::TcpListener;
 
     const SET_KEY_VALUE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";

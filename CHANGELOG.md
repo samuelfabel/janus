@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Cargo workspace (`crates/*`) with shared package metadata; `Command` / `Response` moved to the `janus-types` crate and storage engines, snapshots and WAL to the `janus-storage` crate (no behavior change); CI runs `cargo test --workspace` and the Docker build copies `crates/`
+- Kernel and replication moved to the `janus-kernel` crate, the RESP serializer (with its framing helpers) to `janus-serializer` and the protocol instance to `janus-protocol`; none of them depends on tokio, and the root package keeps only the TCP transport and the binary (no behavior change)
 - Kernel stores `Box<dyn StorageEngine>` (type-erased storage plugin); `FakeClock` clones share time for tests behind dyn
 - TCP transport: growable per-connection buffer, compact-by-offset, write failure closes connection; e2e SET/GET/DEL, multi-message, and fragmented-frame tests
 - In-memory storage supports per-key TTL with lazy expire (`expire_at` / `ttl`); `get` takes `&mut self`

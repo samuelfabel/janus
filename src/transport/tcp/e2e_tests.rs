@@ -12,9 +12,8 @@ use std::{
 use tokio::net::TcpListener;
 
 use super::manager;
+use janus_kernel::Kernel;
 use janus_storage::memory::MemoryStorageEngine;
-
-use crate::kernel::kernel::Kernel;
 
 async fn start_server() -> String {
     start_server_with_dbfile(None).await

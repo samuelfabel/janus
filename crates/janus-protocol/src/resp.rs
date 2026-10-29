@@ -1,13 +1,11 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
 use std::sync::{Arc, Mutex};
 
+use janus_kernel::{Kernel, Role, is_write, lock_kernel};
+use janus_serializer::{DecodeOutcome, Serializer};
 use janus_types::{Command, Response};
 
-use crate::{
-    kernel::kernel::{Kernel, Role, is_write, lock_kernel},
-    protocol::{Protocol, ProtocolError},
-    serializer::{DecodeOutcome, Serializer},
-};
+use crate::{Protocol, ProtocolError};
 
 const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
 const ERR_NOPERM: &str = "NOPERM this connection is read-only";
@@ -126,9 +124,9 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
+    use janus_kernel::Kernel;
+    use janus_serializer::RespSerializer;
     use janus_storage::memory::MemoryStorageEngine;
-
-    use crate::{kernel::kernel::Kernel, serializer::resp::RespSerializer};
 
     fn protocol() -> RespProtocol<RespSerializer> {
         RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer)

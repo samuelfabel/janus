@@ -1,0 +1,15 @@
+[package]
+name = "janus-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Per-connection protocol instance: decode, kernel, encode"
+
+[dependencies]
+janus-types = { workspace = true }
+janus-serializer = { workspace = true }
+janus-kernel = { workspace = true }
+
+[dev-dependencies]
+janus-storage = { workspace = true }

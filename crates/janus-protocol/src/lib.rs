@@ -3,6 +3,7 @@
 pub mod resp;
 pub mod types;
 
+pub use resp::RespProtocol;
 pub use types::ProtocolError;
 
 /// One connection's protocol orchestrator (no sockets).

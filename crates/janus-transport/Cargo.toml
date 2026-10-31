@@ -1,0 +1,16 @@
+[package]
+name = "janus-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tokio TCP transport for Janus: accept loop and per-connection instances"
+
+[dependencies]
+tokio = { workspace = true }
+janus-kernel = { workspace = true }
+janus-protocol = { workspace = true }
+janus-serializer = { workspace = true }
+
+[dev-dependencies]
+janus-storage = { workspace = true }

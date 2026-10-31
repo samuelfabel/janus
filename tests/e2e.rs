@@ -11,7 +11,6 @@ use std::{
 
 use tokio::net::TcpListener;
 
-use super::manager;
 use janus_kernel::Kernel;
 use janus_storage::memory::MemoryStorageEngine;
 
@@ -34,7 +33,7 @@ async fn start_server_with_persistence(
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
     tokio::spawn(async move {
-        let _ = manager::serve(listener, dbfile, wal).await;
+        let _ = janus::serve(listener, dbfile, wal).await;
     });
     // Brief yield so accept is ready
     tokio::task::yield_now().await;
@@ -50,7 +49,7 @@ async fn start_server_with_kernel(kernel: Kernel) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
     tokio::spawn(async move {
-        let _ = manager::accept_loop_with_kernel(listener, Arc::new(Mutex::new(kernel))).await;
+        let _ = janus_transport::accept_loop(listener, Arc::new(Mutex::new(kernel))).await;
     });
     tokio::task::yield_now().await;
     std::thread::sleep(Duration::from_millis(20));

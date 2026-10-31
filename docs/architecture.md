@@ -124,6 +124,43 @@ flowchart TD
 
 Communication should happen through abstractions instead of concrete implementations.
 
+# Crate Map
+
+Each layer lives in its own crate of the Cargo workspace, so the dependency direction is checked by the compiler instead of by convention.
+
+```mermaid
+flowchart TD
+    BIN["janus (composition root + CLI)"] --> T[janus-transport]
+    BIN --> K[janus-kernel]
+    BIN --> S[janus-storage]
+    T --> P[janus-protocol]
+    T --> SER[janus-serializer]
+    T --> K
+    P --> SER
+    P --> K
+    P --> TY[janus-types]
+    SER --> TY
+    K --> TY
+    K --> S
+```
+
+| Crate | Responsibility | Depends on |
+| --- | --- | --- |
+| `janus-types` | Domain `Command` and `Response` | — |
+| `janus-storage` | `StorageEngine` trait, Memory and BTree engines, clock, snapshot codec and store, WAL | — |
+| `janus-kernel` | Command execution, transactions, metrics, traces, authentication and roles, replication sinks | `janus-types`, `janus-storage` |
+| `janus-serializer` | `Serializer` trait and RESP codec | `janus-types` |
+| `janus-protocol` | `Protocol` trait and the per-connection RESP instance (auth / role gate, MULTI queue) | `janus-types`, `janus-serializer`, `janus-kernel` |
+| `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
+| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`) and CLI binary | `janus-transport`, `janus-kernel`, `janus-storage` |
+
+Rules:
+
+- Lower crates never depend on upper crates; `janus-types` and `janus-storage` have no internal dependencies.
+- The transport never sees storage, snapshots or the WAL; persistence is wired only in the composition root.
+- Only `janus-transport` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
+- Tests that need an upper layer use dev-dependencies (for example, serializer tests that drive the Kernel), which do not change the production graph.
+
 # Modularity
 
 Every subsystem should be independently replaceable.

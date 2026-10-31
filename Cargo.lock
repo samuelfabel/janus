@@ -13,9 +13,9 @@ name = "janus"
 version = "0.1.0"
 dependencies = [
  "janus-kernel",
- "janus-protocol",
- "janus-serializer",
  "janus-storage",
+ "janus-transport",
+ "janus-types",
  "tokio",
 ]
 
@@ -49,6 +49,17 @@ dependencies = [
 [[package]]
 name = "janus-storage"
 version = "0.1.0"
+
+[[package]]
+name = "janus-transport"
+version = "0.1.0"
+dependencies = [
+ "janus-kernel",
+ "janus-protocol",
+ "janus-serializer",
+ "janus-storage",
+ "tokio",
+]
 
 [[package]]
 name = "janus-types"

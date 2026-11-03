@@ -21,8 +21,8 @@ Requirements:
 ```bash
 git clone https://github.com/samuelfabel/janus.git
 cd janus
-cargo test
-cargo check
+cargo test --workspace
+cargo check --workspace --all-targets
 ```
 
 Optional: enable repository git hooks:
@@ -33,15 +33,24 @@ Optional: enable repository git hooks:
 
 ## 4. Repository structure
 
+Janus is a Cargo workspace with one crate per layer:
+
 ```text
-src/
-  command/    # domain commands
-  response/   # domain responses
-  kernel/     # command execution
-  storage/    # StorageEngine trait + memory engine
-  protocol/   # protocol layer (in progress)
-docs/         # architecture, vision, roadmap, ADRs
+Cargo.toml              # workspace + root package `janus` (lib + bin)
+src/lib.rs              # composition root: build_storage, build_kernel, listen, serve
+src/main.rs             # CLI / environment -> janus::listen
+tests/e2e.rs            # Tokio TCP end-to-end tests
+crates/
+  janus-types/          # Command, Response
+  janus-storage/        # StorageEngine, Memory / BTree engines, snapshot, WAL
+  janus-kernel/         # Kernel, roles, replication
+  janus-serializer/     # Serializer trait + RESP codec
+  janus-protocol/       # Protocol trait + RESP protocol instance
+  janus-transport/      # Tokio TCP accept loop + connection instance
+docs/                   # architecture, vision, roadmap, ADRs
 ```
+
+Dependencies point downward only; see [docs/architecture.md](docs/architecture.md#crate-map).
 
 ## 5. Coding guidelines
 
@@ -86,16 +95,18 @@ Commit messages must not include tool co-author trailers. Authorship is the huma
 1. Fork (or branch from `main`)
 2. Create a branch following the naming rules above
 3. Keep the change focused; update docs when behavior changes
-4. Ensure `cargo test` passes
+4. Ensure `cargo test --workspace` passes
 5. Fill out `.github/pull_request_template.md`
 
 ## 9. Testing
 
 ```bash
-cargo test
+cargo test --workspace
+# a single crate
+cargo test -p janus-kernel
 ```
 
-Add or update unit tests when changing kernel or storage behavior.
+Unit tests live next to the code in each crate; TCP end-to-end tests live in `tests/e2e.rs`. Add or update tests when changing kernel or storage behavior.
 
 ## 10. Documentation
 

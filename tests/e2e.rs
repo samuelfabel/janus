@@ -11,9 +11,31 @@ use std::{
 
 use tokio::net::TcpListener;
 
-use super::manager;
 use janus_kernel::Kernel;
 use janus_storage::memory::MemoryStorageEngine;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[tokio::test]
+async fn transport_fragmented_frame_two_reads_completes() {
+    let addr = start_server_with_kernel(Kernel::new(MemoryStorageEngine::new())).await;
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let split = 12;
+    client.write_all(&SET_KEY_VALUE[..split]).await.expect("write1");
+    thread::sleep(Duration::from_millis(30));
+    client.write_all(&SET_KEY_VALUE[split..]).await.expect("write2");
+
+    let mut ok = [0u8; 5];
+    client.read_exact(&mut ok).await.expect("read ok");
+    assert_eq!(&ok, b"+OK\r\n");
+}
+
+#[tokio::test]
+async fn transport_eof_ends_run_without_panic() {
+    let addr = start_server_with_kernel(Kernel::new(MemoryStorageEngine::new())).await;
+    let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    drop(client);
+    tokio::task::yield_now().await;
+}
 
 async fn start_server() -> String {
     start_server_with_dbfile(None).await
@@ -34,7 +56,7 @@ async fn start_server_with_persistence(
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
     tokio::spawn(async move {
-        let _ = manager::serve(listener, dbfile, wal).await;
+        let _ = janus::serve(listener, dbfile, wal).await;
     });
     // Brief yield so accept is ready
     tokio::task::yield_now().await;
@@ -50,7 +72,7 @@ async fn start_server_with_kernel(kernel: Kernel) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
     tokio::spawn(async move {
-        let _ = manager::accept_loop_with_kernel(listener, Arc::new(Mutex::new(kernel))).await;
+        let _ = janus_transport::accept_loop(listener, Arc::new(Mutex::new(kernel))).await;
     });
     tokio::task::yield_now().await;
     std::thread::sleep(Duration::from_millis(20));

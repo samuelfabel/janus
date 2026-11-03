@@ -1,8 +1,4 @@
-mod transport;
-
 use std::{env, path::PathBuf, process};
-
-use transport::tcp::manager;
 
 const DEFAULT_BIND: &str = "0.0.0.0:6380";
 
@@ -20,7 +16,7 @@ async fn main() {
         Err(code) => process::exit(code),
     };
 
-    if let Err(err) = manager::listen(&config.bind, config.dbfile, config.wal).await {
+    if let Err(err) = janus::listen(&config.bind, config.dbfile, config.wal).await {
         eprintln!("janus: failed to listen on {}: {err}", config.bind);
         process::exit(1);
     }

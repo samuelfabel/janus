@@ -24,17 +24,19 @@ Steps to verify locally (commands and expected output).
 
 ## Affected areas
 
-- [ ] `src/storage`
-- [ ] `src/kernel`
-- [ ] `src/command` / `src/response`
-- [ ] `src/protocol`
+- [ ] `crates/janus-types`
+- [ ] `crates/janus-storage`
+- [ ] `crates/janus-kernel`
+- [ ] `crates/janus-serializer` / `crates/janus-protocol`
+- [ ] `crates/janus-transport`
+- [ ] Composition root / CLI (`src/`)
 - [ ] `docs`
 - [ ] CI / tooling
 - [ ] Other:
 
 ## Checklist
 
-- [ ] `cargo test` passes
+- [ ] `cargo test --workspace` passes
 - [ ] Tests added or updated when behavior changed
 - [ ] Documentation updated when user-facing behavior changed
 - [ ] Conventional Commits used for commit messages

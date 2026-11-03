@@ -14,6 +14,7 @@ janus-storage = { path = "crates/janus-storage" }
 janus-kernel = { path = "crates/janus-kernel" }
 janus-serializer = { path = "crates/janus-serializer" }
 janus-protocol = { path = "crates/janus-protocol" }
+janus-transport = { path = "crates/janus-transport" }
 
 [package]
 name = "janus"
@@ -30,5 +31,7 @@ categories = ["database-implementations", "network-programming"]
 tokio = { workspace = true }
 janus-storage = { workspace = true }
 janus-kernel = { workspace = true }
-janus-serializer = { workspace = true }
-janus-protocol = { workspace = true }
+janus-transport = { workspace = true }
+
+[dev-dependencies]
+janus-types = { workspace = true }

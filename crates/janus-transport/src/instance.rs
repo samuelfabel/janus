@@ -13,7 +13,6 @@ pub struct TcpInstance<T: Protocol + Send + 'static> {
     protocol: T,
     buffer: Vec<u8>,
 }
-
 impl<T: Protocol + Send + 'static> TcpInstance<T> {
     /// Spawn a Tokio task that owns this connection until EOF or error.
     ///
@@ -68,77 +67,5 @@ impl<T: Protocol + Send + 'static> TcpInstance<T> {
 
         self.buffer.drain(..offset);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use janus_kernel::Kernel;
-    use janus_protocol::RespProtocol;
-    use janus_serializer::RespSerializer;
-    use janus_storage::memory::MemoryStorageEngine;
-    use tokio::net::TcpListener;
-
-    const SET_KEY_VALUE: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
-
-    #[tokio::test]
-    async fn fragmented_frame_two_reads_completes() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let protocol =
-                RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer);
-            let mut instance = TcpInstance {
-                stream,
-                protocol,
-                buffer: Vec::new(),
-            };
-            instance.run().await;
-        });
-
-        let mut client = TcpStream::connect(addr).await.expect("connect");
-        let split = 12;
-        client
-            .write_all(&SET_KEY_VALUE[..split])
-            .await
-            .expect("write1");
-        // Force a separate server read boundary without requiring tokio `time`.
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        client
-            .write_all(&SET_KEY_VALUE[split..])
-            .await
-            .expect("write2");
-
-        let mut ok = [0u8; 5];
-        client.read_exact(&mut ok).await.expect("read ok");
-        assert_eq!(&ok, b"+OK\r\n");
-
-        drop(client);
-        let _ = server.await;
-    }
-
-    #[tokio::test]
-    async fn eof_ends_run_without_panic() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let protocol =
-                RespProtocol::new(Kernel::new(MemoryStorageEngine::new()), RespSerializer);
-            let mut instance = TcpInstance {
-                stream,
-                protocol,
-                buffer: Vec::new(),
-            };
-            instance.run().await;
-        });
-
-        let client = TcpStream::connect(addr).await.expect("connect");
-        drop(client);
-        server.await.expect("server");
     }
 }

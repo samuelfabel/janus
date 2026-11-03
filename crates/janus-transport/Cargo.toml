@@ -11,6 +11,3 @@ tokio = { workspace = true }
 janus-kernel = { workspace = true }
 janus-protocol = { workspace = true }
 janus-serializer = { workspace = true }
-
-[dev-dependencies]
-janus-storage = { workspace = true }

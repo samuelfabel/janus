@@ -70,6 +70,42 @@ pub async fn serve(
     janus_transport::accept_loop(listener, kernel).await
 }
 
+/// Bind and accept forever with a caller-provided protocol factory.
+///
+/// The factory is called once for each TCP connection and receives the shared
+/// Kernel. The default [`listen`] entry point continues to use RESP.
+pub async fn listen_with_protocol<P, F>(
+    bind: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+    factory: F,
+) -> io::Result<()>
+where
+    P: janus_transport::Protocol + Send + 'static,
+    F: Fn(Arc<Mutex<Kernel>>) -> P + Send + 'static,
+{
+    let listener = TcpListener::bind(bind).await?;
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    eprintln!("janus: listening on {bind}");
+    janus_transport::accept_loop_with_protocol(listener, kernel, factory).await
+}
+
+/// Accept on an already-bound listener with a caller-provided protocol
+/// factory. The storage and persistence composition matches [`serve`].
+pub async fn serve_with_protocol<P, F>(
+    listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+    factory: F,
+) -> io::Result<()>
+where
+    P: janus_transport::Protocol + Send + 'static,
+    F: Fn(Arc<Mutex<Kernel>>) -> P + Send + 'static,
+{
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    janus_transport::accept_loop_with_protocol(listener, kernel, factory).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,41 @@ jobs:
         run: cargo test --workspace
       - name: Cargo check
         run: cargo check --workspace --all-targets
+      - name: Docker build and TCP smoke test
+        run: |
+          docker build -t janus:ci .
+          docker run --rm -d --name janus-ci-smoke -p 16380:6380 janus:ci
+          cleanup() { docker stop janus-ci-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          python3 - <<'PY'
+          import socket
+          import time
+
+          request = (
+              b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n"
+              b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"
+          )
+          expected = b"+OK\r\n$5\r\nvalue\r\n"
+          deadline = time.monotonic() + 30
+          while True:
+              try:
+                  with socket.create_connection(("127.0.0.1", 16380), timeout=2) as client:
+                      client.settimeout(2)
+                      client.sendall(request)
+                      response = bytearray()
+                      while expected not in response:
+                          chunk = client.recv(128)
+                          if not chunk:
+                              break
+                          response.extend(chunk)
+                      if expected not in response:
+                          raise RuntimeError(f"unexpected RESP response: {bytes(response)!r}")
+                      break
+              except OSError:
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(0.5)
+          PY
 
   no-tool-coauthor:
     runs-on: ubuntu-latest

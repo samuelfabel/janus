@@ -13,6 +13,8 @@ name = "janus"
 version = "0.1.0"
 dependencies = [
  "janus-kernel",
+ "janus-protocol",
+ "janus-serializer",
  "janus-storage",
  "janus-transport",
  "janus-types",

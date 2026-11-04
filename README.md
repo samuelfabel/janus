@@ -16,6 +16,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
+- Library callers can provide a per-connection protocol factory with `listen_with_protocol` or `serve_with_protocol`; the command-line server remains TCP + RESP
 - Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
 - Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
 - Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)

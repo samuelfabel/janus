@@ -12,8 +12,103 @@ use std::{
 use tokio::net::TcpListener;
 
 use janus_kernel::Kernel;
+use janus_protocol::RespProtocol;
+use janus_serializer::{DecodeOutcome, Serializer};
 use janus_storage::memory::MemoryStorageEngine;
+use janus_types::{Command, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[derive(Clone, Copy)]
+struct LineSerializer;
+
+impl Serializer for LineSerializer {
+    fn encode(&self, response: &Response) -> Vec<u8> {
+        match response {
+            Response::Empty => b"OK\n".to_vec(),
+            Response::Queued => b"QUEUED\n".to_vec(),
+            Response::Value(None) => b"NULL\n".to_vec(),
+            Response::Value(Some(value)) => {
+                let mut output = b"VALUE ".to_vec();
+                output.extend_from_slice(value);
+                output.push(b'\n');
+                output
+            }
+            Response::Deleted(deleted) => format!("DELETED {}\n", u8::from(*deleted)).into_bytes(),
+            Response::Integer(value) => format!("INTEGER {value}\n").into_bytes(),
+            Response::Array(items) => items.iter().flat_map(|item| self.encode(item)).collect(),
+            Response::Error(message) => format!("ERROR {message}\n").into_bytes(),
+        }
+    }
+
+    fn decode_one<'a>(&self, input: &'a [u8]) -> DecodeOutcome<'a> {
+        let Some(end) = input.iter().position(|byte| *byte == b'\n') else {
+            return DecodeOutcome::Incomplete;
+        };
+        let mut fields = input[..end].split(|byte| *byte == b' ');
+        let Some(verb) = fields.next() else {
+            return DecodeOutcome::Invalid {
+                message: "empty command",
+            };
+        };
+        match verb {
+            b"SET" => match (fields.next(), fields.next(), fields.next()) {
+                (Some(key), Some(value), None) => DecodeOutcome::Ok {
+                    command: Command::Set { key, value },
+                    consumed: end + 1,
+                },
+                _ => DecodeOutcome::Invalid {
+                    message: "SET arity",
+                },
+            },
+            b"GET" => match (fields.next(), fields.next()) {
+                (Some(key), None) => DecodeOutcome::Ok {
+                    command: Command::Get { key },
+                    consumed: end + 1,
+                },
+                _ => DecodeOutcome::Invalid {
+                    message: "GET arity",
+                },
+            },
+            _ => DecodeOutcome::UnknownCommand {
+                name: verb.to_vec(),
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn custom_serializer_factory_serves_each_connection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr").to_string();
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&factory_calls);
+    tokio::spawn(async move {
+        let _ = janus::serve_with_protocol(listener, None, None, move |kernel| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            RespProtocol::shared(kernel, LineSerializer)
+        })
+        .await;
+    });
+
+    for _ in 0..2 {
+        let mut client = tokio::net::TcpStream::connect(&addr)
+            .await
+            .expect("connect");
+        client
+            .write_all(b"SET key value\nGET key\n")
+            .await
+            .expect("write");
+        let mut response = [0u8; 15];
+        client
+            .read_exact(&mut response)
+            .await
+            .expect("read response");
+        assert_eq!(&response, b"OK\nVALUE value\n");
+    }
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+}
 
 #[tokio::test]
 async fn transport_fragmented_frame_two_reads_completes() {

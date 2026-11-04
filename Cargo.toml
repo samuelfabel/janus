@@ -35,3 +35,5 @@ janus-transport = { workspace = true }
 
 [dev-dependencies]
 janus-types = { workspace = true }
+janus-protocol = { workspace = true }
+janus-serializer = { workspace = true }

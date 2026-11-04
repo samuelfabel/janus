@@ -34,6 +34,13 @@ Clients never communicate directly with the storage engine.
 
 Responsible for translating external protocols into internal commands.
 
+The root library exposes `listen_with_protocol` and `serve_with_protocol` for
+callers that need a custom protocol/serializer composition. The supplied
+factory creates one `Protocol` instance for each accepted TCP connection and
+receives the server's shared Kernel. `listen` and `serve` keep RESP as their
+default; the command-line server remains TCP + RESP. The transport provided by
+Janus is TCP, and protocol selection or negotiation is not performed at runtime.
+
 Examples:
 
 - RESP parser

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Library APIs `listen_with_protocol` and `serve_with_protocol` accept a protocol factory per TCP connection; existing entry points and the command-line server keep RESP as the default
 - Tokio TCP e2e coverage for read-only authorization (read-only connection reads, writes get `NOPERM` and are not queued in `MULTI`; two connections with different roles on one server) and README authorization notes
 - Per-connection role in the RESP protocol instance: a read-only connection gets `-NOPERM this connection is read-only` for write commands, which never reach the Kernel (not queued inside `MULTI`, not counted in metrics or traces); the last successful `AUTH` sets the role
 - Kernel optional read-only password (`with_readonly_pass`), `Role` (`Full` / `ReadOnly`) resolved by `role_for`, and `is_write` command classification (`SET` / `DEL` / `EXPIRE` / `SAVE`); `AUTH` accepts either password

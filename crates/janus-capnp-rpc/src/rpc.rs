@@ -170,7 +170,7 @@ fn write_response(
                 write_response(&mut array.reborrow().get(index as u32), item)?;
             }
         }
-        Response::Error(message) => builder.set_error(message)?,
+        Response::Error(message) => builder.set_error(message),
     }
     Ok(())
 }

@@ -16,21 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tokio TCP e2e coverage for read-only authorization (read-only connection reads, writes get `NOPERM` and are not queued in `MULTI`; two connections with different roles on one server) and README authorization notes
 - Per-connection role in the RESP protocol instance: a read-only connection gets `-NOPERM this connection is read-only` for write commands, which never reach the Kernel (not queued inside `MULTI`, not counted in metrics or traces); the last successful `AUTH` sets the role
 - Kernel optional read-only password (`with_readonly_pass`), `Role` (`Full` / `ReadOnly`) resolved by `role_for`, and `is_write` command classification (`SET` / `DEL` / `EXPIRE` / `SAVE`); `AUTH` accepts either password
-- Per-connection `NOAUTH` gate in the RESP protocol instance when a requirepass is set, TCP e2e for AUTH (blocked, wrong password, success, per-connection) and README authentication notes (pedagogical; no ACL / TLS; default server stays open)
+- Per-connection `NOAUTH` gate in the RESP protocol instance when a requirepass is set, with TCP e2e coverage for blocked commands, invalid passwords, and successful authentication
 - RESP decode for `AUTH <password>` (arity 2; `AUTH username password` rejected as invalid arity) with fixtures; Auth responses encode as `+OK` / `-ERR …`
 - Kernel optional `requirepass` (`with_requirepass`, `auth_required`) and `Command::Auth` with stable errors (invalid password, no password configured, rejected inside MULTI)
-- TCP e2e for `TRACES` spans after SET/GET and README tracing notes (pedagogical; no OTLP/W3C)
+- TCP e2e coverage for `TRACES` spans after SET/GET
 - RESP decode for `TRACES` (arity 1) with fixtures; Traces response encodes as bulk string
-- Kernel pedagogical trace ring buffer (capacity 64) and `Command::Traces` text payload (`Response::Value`)
-- TCP e2e for `INFO` counters after SET/GET hit/miss and README metrics notes (pedagogical; no Prometheus/OTLP)
+- Kernel trace ring buffer (capacity 64) and `Command::Traces` text payload (`Response::Value`)
+- TCP e2e coverage for `INFO` counters after SET/GET hit/miss
 - RESP decode for `INFO` (arity 1) with fixtures; Info response encodes as bulk string
-- Kernel pedagogical metrics (`total_commands`, `keyspace_hits`, `keyspace_misses`) and `Command::Info` text payload (`Response::Value`)
-- TCP e2e for `MULTI` / `EXEC` / `DISCARD` and README transactions notes (pedagogical queue; no WATCH/ACID)
+- Kernel metrics (`total_commands`, `keyspace_hits`, `keyspace_misses`) and `Command::Info` text payload (`Response::Value`)
+- TCP e2e coverage for `MULTI` / `EXEC` / `DISCARD`
 - RESP decode for `MULTI` / `EXEC` / `DISCARD` (arity 1) with fixtures for Queued / Array encode
 - Kernel `MULTI` / `EXEC` / `DISCARD` transaction queue with `Response::Queued` and `Response::Array` (RESP encode for exhaustiveness; decode in F9-02)
 - In-process primary→replica replication harness and README Phase 10 notes (single-node default; no Raft/cluster)
 - Kernel optional `ReplicationSink` (`with_replica` / `from_boxed_with_replica`), post-mutation replicate, `apply_replication_record` for replicas, and `ERR replication failed` (no local rollback)
-- `ReplicationRecord` and `ReplicationSink` (with `FakeReplicationSink` tests) for pedagogical primary→replica
+- `ReplicationRecord` and `ReplicationSink` (with `FakeReplicationSink` tests) for primary-to-replica replication
 - Composition-root `build_storage()` (default Memory) and Kernel `from_boxed*` injectors; README modular storage notes
 - `BTreeStorageEngine` (`BTreeMap` plugin) with contract tests and Kernel smoke behind `Box<dyn StorageEngine>`
 - `StorageEngine` trait and `MemoryStorageEngine` with unit tests for get/set/delete

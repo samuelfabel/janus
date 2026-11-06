@@ -261,4 +261,4 @@ The project is successful when:
 - Every architectural decision is documented.
 - Performance improvements are measurable.
 - New features can be added with minimal coupling.
-- The codebase continues to be an educational reference.
+- Keep the codebase focused on its documented use cases.

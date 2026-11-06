@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/samuelfabel/janus"
 
 [workspace.dependencies]
-tokio = { version = "1.53.1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
+tokio = { version = "1.53.1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync"] }
 janus-types = { path = "crates/janus-types" }
 janus-storage = { path = "crates/janus-storage" }
 janus-kernel = { path = "crates/janus-kernel" }
@@ -17,6 +17,7 @@ janus-protocol = { path = "crates/janus-protocol" }
 janus-transport = { path = "crates/janus-transport" }
 janus-http3 = { path = "crates/janus-http3" }
 janus-capnp-rpc = { path = "crates/janus-capnp-rpc", default-features = false }
+janus-grpc = { path = "crates/janus-grpc", default-features = false }
 http = "1"
 bytes = "1"
 
@@ -34,6 +35,7 @@ categories = ["database-implementations", "network-programming"]
 [features]
 default = []
 capnp = ["dep:janus-capnp-rpc", "janus-capnp-rpc/rpc"]
+grpc = ["dep:janus-grpc", "janus-grpc/rpc"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -43,6 +45,7 @@ janus-transport = { workspace = true }
 janus-http3 = { workspace = true }
 janus-protocol = { workspace = true }
 janus-capnp-rpc = { workspace = true, optional = true, default-features = false }
+janus-grpc = { workspace = true, optional = true, default-features = false }
 
 [dev-dependencies]
 bytes = { workspace = true }

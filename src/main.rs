@@ -1,15 +1,17 @@
 use std::{env, path::PathBuf, process};
-#[cfg(feature = "capnp")]
+#[cfg(any(feature = "capnp", feature = "grpc"))]
 use tokio::net::TcpListener;
 
 const DEFAULT_BIND: &str = "0.0.0.0:6380";
 const DEFAULT_CAPNP_BIND: &str = "0.0.0.0:6381";
+const DEFAULT_GRPC_BIND: &str = "0.0.0.0:6382";
 
 #[derive(Debug)]
 struct Config {
     protocol: String,
     bind: String,
     capnp_bind: String,
+    grpc_bind: String,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 }
@@ -21,14 +23,27 @@ async fn main() {
         Err(code) => process::exit(code),
     };
 
-    if config.protocol != "resp" && !cfg!(feature = "capnp") {
+    #[cfg(not(feature = "capnp"))]
+    if matches!(config.protocol.as_str(), "capnp" | "both" | "all") {
         eprintln!(
             "janus: protocol '{}' requires a build with --features capnp",
-            config.protocol
+            config.protocol,
         );
         process::exit(2);
     }
-    #[cfg(not(feature = "capnp"))]
+    #[cfg(not(feature = "grpc"))]
+    if matches!(config.protocol.as_str(), "grpc" | "resp+grpc" | "all") {
+        eprintln!(
+            "janus: protocol '{}' requires a build with --features grpc",
+            config.protocol,
+        );
+        process::exit(2);
+    }
+    #[cfg(not(any(feature = "capnp", feature = "grpc")))]
+    let _ = (&config.capnp_bind, &config.grpc_bind);
+    #[cfg(all(feature = "capnp", not(feature = "grpc")))]
+    let _ = &config.grpc_bind;
+    #[cfg(all(feature = "grpc", not(feature = "capnp")))]
     let _ = &config.capnp_bind;
 
     let result = match config.protocol.as_str() {
@@ -43,24 +58,51 @@ async fn main() {
         },
         #[cfg(feature = "capnp")]
         "both" => {
-            let resp_listener = match TcpListener::bind(&config.bind).await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    eprintln!("janus: failed to listen on {}: {error}", config.bind);
-                    process::exit(1);
-                }
-            };
-            let capnp_listener = match TcpListener::bind(&config.capnp_bind).await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    eprintln!("janus: failed to listen on {}: {error}", config.capnp_bind);
-                    process::exit(1);
-                }
-            };
+            let resp_listener = bind_or_exit(&config.bind, "RESP").await;
+            let capnp_listener = bind_or_exit(&config.capnp_bind, "Cap'n Proto RPC").await;
             eprintln!("janus: RESP listening on {}", config.bind);
             eprintln!("janus: Cap'n Proto RPC listening on {}", config.capnp_bind);
             janus::serve_with_protocols(resp_listener, capnp_listener, config.dbfile, config.wal)
                 .await
+        }
+        #[cfg(feature = "grpc")]
+        "grpc" => match TcpListener::bind(&config.grpc_bind).await {
+            Ok(listener) => {
+                eprintln!("janus: gRPC listening on {}", config.grpc_bind);
+                janus::serve_with_grpc(listener, config.dbfile, config.wal).await
+            }
+            Err(error) => Err(error),
+        },
+        #[cfg(feature = "grpc")]
+        "resp+grpc" => {
+            let resp_listener = bind_or_exit(&config.bind, "RESP").await;
+            let grpc_listener = bind_or_exit(&config.grpc_bind, "gRPC").await;
+            eprintln!("janus: RESP listening on {}", config.bind);
+            eprintln!("janus: gRPC listening on {}", config.grpc_bind);
+            janus::serve_with_resp_and_grpc(
+                resp_listener,
+                grpc_listener,
+                config.dbfile,
+                config.wal,
+            )
+            .await
+        }
+        #[cfg(all(feature = "capnp", feature = "grpc"))]
+        "all" => {
+            let resp_listener = bind_or_exit(&config.bind, "RESP").await;
+            let capnp_listener = bind_or_exit(&config.capnp_bind, "Cap'n Proto RPC").await;
+            let grpc_listener = bind_or_exit(&config.grpc_bind, "gRPC").await;
+            eprintln!("janus: RESP listening on {}", config.bind);
+            eprintln!("janus: Cap'n Proto RPC listening on {}", config.capnp_bind);
+            eprintln!("janus: gRPC listening on {}", config.grpc_bind);
+            janus::serve_with_all_protocols(
+                resp_listener,
+                capnp_listener,
+                grpc_listener,
+                config.dbfile,
+                config.wal,
+            )
+            .await
         }
         _ => unreachable!("protocol validated by resolve_config"),
     };
@@ -68,6 +110,17 @@ async fn main() {
     if let Err(err) = result {
         eprintln!("janus: server failed: {err}");
         process::exit(1);
+    }
+}
+
+#[cfg(any(feature = "capnp", feature = "grpc"))]
+async fn bind_or_exit(address: &str, protocol: &str) -> TcpListener {
+    match TcpListener::bind(address).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("janus: failed to bind {protocol} listener on {address}: {error}");
+            process::exit(1);
+        }
     }
 }
 
@@ -79,6 +132,7 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
     let mut protocol_from_cli: Option<String> = None;
     let mut bind_from_cli: Option<String> = None;
     let mut capnp_bind_from_cli: Option<String> = None;
+    let mut grpc_bind_from_cli: Option<String> = None;
     let mut dbfile_from_cli: Option<PathBuf> = None;
     let mut wal_from_cli: Option<PathBuf> = None;
     let mut i = 0;
@@ -124,6 +178,18 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
                 capnp_bind_from_cli = Some(other.trim_start_matches("--capnp-bind=").to_string());
                 i += 1;
             }
+            "--grpc-bind" => {
+                let value = args.get(i + 1).cloned().ok_or_else(|| {
+                    eprintln!("janus: --grpc-bind requires an address (example: 0.0.0.0:6382)");
+                    2
+                })?;
+                grpc_bind_from_cli = Some(value);
+                i += 2;
+            }
+            other if other.starts_with("--grpc-bind=") => {
+                grpc_bind_from_cli = Some(other.trim_start_matches("--grpc-bind=").to_string());
+                i += 1;
+            }
             "--dbfile" => {
                 let value = args.get(i + 1).cloned().ok_or_else(|| {
                     eprintln!("janus: --dbfile requires a path");
@@ -163,13 +229,19 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
     let protocol = protocol_from_cli
         .or_else(|| env::var("JANUS_PROTOCOL").ok())
         .unwrap_or_else(|| "resp".to_string());
-    if !matches!(protocol.as_str(), "resp" | "capnp" | "both") {
-        eprintln!("janus: invalid protocol '{protocol}'; expected resp, capnp, or both");
+    if !matches!(
+        protocol.as_str(),
+        "resp" | "capnp" | "grpc" | "both" | "resp+grpc" | "all"
+    ) {
+        eprintln!("janus: invalid protocol '{protocol}'");
         return Err(2);
     }
     let capnp_bind = capnp_bind_from_cli
         .or_else(|| env::var("JANUS_CAPNP_BIND").ok())
         .unwrap_or_else(|| DEFAULT_CAPNP_BIND.to_string());
+    let grpc_bind = grpc_bind_from_cli
+        .or_else(|| env::var("JANUS_GRPC_BIND").ok())
+        .unwrap_or_else(|| DEFAULT_GRPC_BIND.to_string());
 
     let dbfile = dbfile_from_cli.or_else(|| env::var("JANUS_DBFILE").ok().map(PathBuf::from));
     let wal = wal_from_cli.or_else(|| env::var("JANUS_WAL").ok().map(PathBuf::from));
@@ -183,6 +255,7 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
         protocol,
         bind,
         capnp_bind,
+        grpc_bind,
         dbfile,
         wal,
     })
@@ -194,12 +267,13 @@ fn print_help() {
 Janus — modular data kernel
 
 USAGE:
-    janus [--protocol <resp|capnp|both>] [--bind <ADDR>] [--capnp-bind <ADDR>] [--dbfile <PATH> | --wal <PATH>]
+    janus [--protocol <resp|capnp|grpc|both|resp+grpc|all>] [--bind <ADDR>] [--capnp-bind <ADDR>] [--grpc-bind <ADDR>] [--dbfile <PATH> | --wal <PATH>]
 
 OPTIONS:
     --bind <ADDR>     Listen address (default: {DEFAULT_BIND})
-    --protocol <MODE> Listener protocol: resp (default), capnp, or both (requires --features capnp)
+    --protocol <MODE> Listener protocol: resp (default), capnp, grpc, both (RESP + Cap'n Proto), resp+grpc, or all
     --capnp-bind <ADDR> Cap'n Proto RPC address (default: {DEFAULT_CAPNP_BIND})
+    --grpc-bind <ADDR> gRPC address (default: {DEFAULT_GRPC_BIND})
     --dbfile <PATH>   Snapshot file for SAVE / boot load (optional)
     --wal <PATH>      Append-only WAL for mutation replay on boot (optional)
     -h, --help        Show help
@@ -208,6 +282,7 @@ ENVIRONMENT:
     JANUS_BIND        Listen address when --bind is not set
     JANUS_PROTOCOL    Listener protocol when --protocol is not set
     JANUS_CAPNP_BIND   Cap'n Proto RPC address when --capnp-bind is not set
+    JANUS_GRPC_BIND    gRPC address when --grpc-bind is not set
     JANUS_DBFILE      Snapshot path when --dbfile is not set
     JANUS_WAL         WAL path when --wal is not set
 
@@ -227,6 +302,7 @@ mod cli_tests {
         assert_eq!(cfg.bind, "127.0.0.1:7000");
         assert_eq!(cfg.protocol, "resp");
         assert_eq!(cfg.capnp_bind, DEFAULT_CAPNP_BIND);
+        assert_eq!(cfg.grpc_bind, DEFAULT_GRPC_BIND);
         assert!(cfg.dbfile.is_none());
         assert!(cfg.wal.is_none());
     }
@@ -241,6 +317,18 @@ mod cli_tests {
         .unwrap();
         assert_eq!(cfg.protocol, "both");
         assert_eq!(cfg.capnp_bind, "127.0.0.1:7001");
+    }
+
+    #[test]
+    fn resolve_config_accepts_grpc_modes_and_bind() {
+        let cfg = resolve_config(vec![
+            "--protocol=resp+grpc".into(),
+            "--grpc-bind".into(),
+            "127.0.0.1:7002".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg.protocol, "resp+grpc");
+        assert_eq!(cfg.grpc_bind, "127.0.0.1:7002");
     }
 
     #[test]

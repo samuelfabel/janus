@@ -10,7 +10,7 @@ COPY src ./src
 ARG JANUS_FEATURES=
 RUN if [ -n "$JANUS_FEATURES" ]; then \
         apt-get update \
-        && apt-get install -y --no-install-recommends capnproto \
+        && apt-get install -y --no-install-recommends capnproto protobuf-compiler \
         && rm -rf /var/lib/apt/lists/* \
         && cargo build --release --features "$JANUS_FEATURES"; \
     else \
@@ -31,5 +31,6 @@ WORKDIR /app
 ENV JANUS_BIND=0.0.0.0:6380
 EXPOSE 6380
 EXPOSE 6381
+EXPOSE 6382
 
 ENTRYPOINT ["/usr/local/bin/janus"]

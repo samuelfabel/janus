@@ -41,6 +41,12 @@ receives the server's shared Kernel. `listen` and `serve` keep RESP as their
 default; the command-line server remains TCP + RESP. The transport provided by
 Janus is TCP, and protocol selection or negotiation is not performed at runtime.
 
+An experimental, library-only `janus-http3` crate provides a separate HTTP/3
+edge over Quinn. Its caller supplies certificate material to `bind`; the
+endpoint is restricted to ALPN `h3` and TLS 1.3, with 0-RTT disabled. The root
+library's `serve_with_http3` runs the existing TCP/RESP listener and HTTP/3
+endpoint against one shared Kernel. The CLI and default server remain TCP + RESP.
+
 Examples:
 
 - RESP parser
@@ -138,11 +144,14 @@ Each layer lives in its own crate of the Cargo workspace, so the dependency dire
 ```mermaid
 flowchart TD
     BIN["janus (composition root + CLI)"] --> T[janus-transport]
+    BIN --> H3[janus-http3]
     BIN --> K[janus-kernel]
     BIN --> S[janus-storage]
     T --> P[janus-protocol]
     T --> SER[janus-serializer]
     T --> K
+    H3 --> P
+    H3 --> Q[Quinn + h3]
     P --> SER
     P --> K
     P --> TY[janus-types]
@@ -157,15 +166,17 @@ flowchart TD
 | `janus-storage` | `StorageEngine` trait, Memory and BTree engines, clock, snapshot codec and store, WAL | — |
 | `janus-kernel` | Command execution, transactions, metrics, traces, authentication and roles, replication sinks | `janus-types`, `janus-storage` |
 | `janus-serializer` | `Serializer` trait and RESP codec | `janus-types` |
-| `janus-protocol` | `Protocol` trait and the per-connection RESP instance (auth / role gate, MULTI queue) | `janus-types`, `janus-serializer`, `janus-kernel` |
+| `janus-protocol` | `Protocol` trait, RESP instance, and HTTP key/value adapter | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`) and CLI binary | `janus-transport`, `janus-kernel`, `janus-storage` |
+| `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
+| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`) and CLI binary | `janus-transport`, `janus-http3`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
 
 Rules:
 
 - Lower crates never depend on upper crates; `janus-types` and `janus-storage` have no internal dependencies.
 - The transport never sees storage, snapshots or the WAL; persistence is wired only in the composition root.
-- Only `janus-transport` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
+- `janus-transport`, `janus-http3` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
+- HTTP/3 remains an opt-in library edge; the command-line composition continues to use TCP + RESP.
 - Tests that need an upper layer use dev-dependencies (for example, serializer tests that drive the Kernel), which do not change the production graph.
 
 # Modularity

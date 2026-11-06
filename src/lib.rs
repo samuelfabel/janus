@@ -7,11 +7,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use janus_http3::quic::Endpoint;
 use janus_kernel::Kernel;
+use janus_protocol::HttpKvProtocol;
 use janus_storage::{
-    MemoryStorageEngine, StorageEngine,
-    store::{FileSnapshotStore, boot_load},
+    store::{boot_load, FileSnapshotStore},
     wal::boot_wal,
+    MemoryStorageEngine, StorageEngine,
 };
 use tokio::net::TcpListener;
 
@@ -49,11 +51,7 @@ pub fn build_kernel(dbfile: Option<PathBuf>, wal: Option<PathBuf>) -> io::Result
 }
 
 /// Bind and accept forever (Tokio tasks per connection).
-pub async fn listen(
-    bind: &str,
-    dbfile: Option<PathBuf>,
-    wal: Option<PathBuf>,
-) -> io::Result<()> {
+pub async fn listen(bind: &str, dbfile: Option<PathBuf>, wal: Option<PathBuf>) -> io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
     eprintln!("janus: listening on {bind}");
@@ -104,6 +102,23 @@ where
 {
     let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
     janus_transport::accept_loop_with_protocol(listener, kernel, factory).await
+}
+
+/// Serve RESP over TCP and HTTP/3 over a caller-configured QUIC endpoint.
+/// Both interfaces share the same Kernel; HTTP/3 remains opt-in and library-only.
+pub async fn serve_with_http3(
+    tcp_listener: TcpListener,
+    endpoint: Endpoint,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    let tcp = janus_transport::accept_loop(tcp_listener, Arc::clone(&kernel));
+    let http3 = janus_http3::accept_loop(endpoint, move || {
+        HttpKvProtocol::shared(Arc::clone(&kernel))
+    });
+    tokio::try_join!(tcp, http3)?;
+    Ok(())
 }
 
 #[cfg(test)]

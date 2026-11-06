@@ -1,0 +1,22 @@
+[package]
+name = "janus-http3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional HTTP/3 and QUIC server edge for Janus"
+
+[dependencies]
+bytes = { workspace = true }
+h3 = "=0.0.8"
+h3-quinn = "=0.0.10"
+http = { workspace = true }
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { workspace = true, features = ["time"] }
+janus-protocol = { workspace = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+janus-kernel = { workspace = true }
+janus-storage = { workspace = true }

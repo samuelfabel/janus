@@ -15,6 +15,9 @@ janus-kernel = { path = "crates/janus-kernel" }
 janus-serializer = { path = "crates/janus-serializer" }
 janus-protocol = { path = "crates/janus-protocol" }
 janus-transport = { path = "crates/janus-transport" }
+janus-http3 = { path = "crates/janus-http3" }
+http = "1"
+bytes = "1"
 
 [package]
 name = "janus"
@@ -32,8 +35,16 @@ tokio = { workspace = true }
 janus-storage = { workspace = true }
 janus-kernel = { workspace = true }
 janus-transport = { workspace = true }
+janus-http3 = { workspace = true }
+janus-protocol = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+h3 = "=0.0.8"
+h3-quinn = "=0.0.10"
+http = { workspace = true }
 janus-types = { workspace = true }
 janus-protocol = { workspace = true }
 janus-serializer = { workspace = true }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -17,6 +17,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
 - Library callers can provide a per-connection protocol factory with `listen_with_protocol` or `serve_with_protocol`; the command-line server remains TCP + RESP
+- An experimental, library-only HTTP/3 edge is available through `janus-http3` and `serve_with_http3`; it uses caller-supplied TLS certificates and leaves the CLI on TCP + RESP
 - Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
 - Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
 - Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
@@ -32,7 +33,7 @@ This project does **not**:
 - Run a multi-node cluster or consensus protocol in the default server binary
 - Provide WATCH, Lua scripting, or full ACID transactions
 - Export Prometheus / OpenTelemetry metrics or distributed tracing
-- Provide ACLs (per-command or per-key permissions), multiple users, or TLS
+- Provide ACLs (per-command or per-key permissions), or TLS for the default TCP/RESP listener
 
 ## Status
 
@@ -46,7 +47,7 @@ TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI`
 
 **Tracing (pedagogical):** the Kernel keeps a fixed-capacity ring buffer of command spans (`id` + command name). `TRACES` returns a `# Traces` text bulk string with the recent sequence. Covered by the Tokio TCP e2e harness — not OpenTelemetry, OTLP, or W3C Trace Context.
 
-**Authentication (pedagogical):** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each connection starts unauthenticated and every command except `AUTH <password>` returns `-NOAUTH Authentication required.`; a matching `AUTH` returns `+OK` and unlocks that connection only, a wrong one returns `-ERR invalid password`. Without a requirepass the server stays open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected, never queued. The default `cargo run` server has **no** password; requirepass is set in the composition root and is covered by the Tokio TCP e2e harness — not ACL, multiple users, `AUTH username password`, or TLS.
+**Authentication (pedagogical):** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each TCP/RESP connection starts unauthenticated and every command except `AUTH <password>` returns `-NOAUTH Authentication required.`; a matching `AUTH` returns `+OK` and unlocks that connection only, a wrong one returns `-ERR invalid password`. Without a requirepass the server stays open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected, never queued. The default `cargo run` server has **no** password; requirepass is set in the composition root and is covered by the Tokio TCP e2e harness — not ACL, multiple users, `AUTH username password`, or TLS on the default TCP/RESP listener.
 
 **Authorization (pedagogical):** next to `requirepass` (role `Full`), the Kernel accepts an optional read-only password (`Kernel::with_readonly_pass`, role `ReadOnly`). The password used in the last successful `AUTH` sets the role of that connection; a failed `AUTH` keeps the current role. A `ReadOnly` connection can run reads (`GET`, `TTL`, `INFO`, `TRACES`) and transaction control, but write commands (`SET`, `DEL`, `EXPIRE`, `SAVE`) return `-NOPERM this connection is read-only` without reaching the Kernel: inside `MULTI` they are not queued, and they are not counted in `INFO` or recorded in `TRACES`. With only a read-only password configured, every authenticated connection is `ReadOnly`. Roles are per connection and covered by the Tokio TCP e2e harness; the default `cargo run` server has **no** passwords — not ACLs, named users, Redis command categories, or TLS.
 
@@ -71,11 +72,14 @@ Janus is a Cargo workspace with one crate per layer. Dependencies point downward
 | `janus-storage` | `StorageEngine`, Memory / BTree engines, snapshot, WAL | — |
 | `janus-kernel` | Kernel, roles, replication | `janus-types`, `janus-storage` |
 | `janus-serializer` | `Serializer` + RESP codec | `janus-types` |
-| `janus-protocol` | `Protocol` + RESP protocol instance | `janus-types`, `janus-serializer`, `janus-kernel` |
+| `janus-protocol` | `Protocol` + RESP and HTTP protocol adapters | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop + connection instance | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-kernel`, `janus-storage` |
+| `janus-http3` | Optional HTTP/3 server edge over Quinn | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
+| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-http3`, `janus-protocol`, `janus-kernel`, `janus-storage` |
 
-Only `janus-transport` and the root package depend on Tokio. TCP end-to-end tests live in `tests/e2e.rs`.
+`janus-transport`, `janus-http3`, and the root package depend on Tokio. TCP end-to-end tests live in `tests/e2e.rs`; HTTP/3 loopback coverage lives in `crates/janus-http3/tests/`.
+
+The HTTP/3 endpoint is experimental and opt-in for Rust library callers. `janus-http3::bind` configures a Quinn endpoint with ALPN `h3`, TLS 1.3, and 0-RTT disabled. Pass it with a bound TCP listener to `janus::serve_with_http3` to share one Kernel between RESP and HTTP/3. The supported HTTP routes are `GET`, `PUT`, and `DELETE /keys/{key}`; values are opaque bytes and request bodies are limited to 1 MiB. The command-line server, Docker image, and Compose configuration continue to expose TCP + RESP only.
 
 ## Run the server
 
@@ -114,7 +118,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, and the in-process primary→replica replication harness).
+Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, and the in-process primary→replica replication harness). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
 
 ## Docker
 

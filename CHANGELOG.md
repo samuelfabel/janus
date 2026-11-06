@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Experimental `janus-http3` library crate using Quinn and `h3`, with caller-supplied TLS 1.3 certificates, `h3` ALPN, disabled 0-RTT, a 1 MiB request body limit, and GET/PUT/DELETE key routes; `serve_with_http3` shares the Kernel with TCP/RESP while the CLI remains unchanged
 - Library APIs `listen_with_protocol` and `serve_with_protocol` accept a protocol factory per TCP connection; existing entry points and the command-line server keep RESP as the default
 - Tokio TCP e2e coverage for read-only authorization (read-only connection reads, writes get `NOPERM` and are not queued in `MULTI`; two connections with different roles on one server) and README authorization notes
 - Per-connection role in the RESP protocol instance: a read-only connection gets `-NOPERM this connection is read-only` for write commands, which never reach the Kernel (not queued inside `MULTI`, not counted in metrics or traces); the last successful `AUTH` sets the role

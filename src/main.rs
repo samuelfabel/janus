@@ -1,10 +1,15 @@
 use std::{env, path::PathBuf, process};
+#[cfg(feature = "capnp")]
+use tokio::net::TcpListener;
 
 const DEFAULT_BIND: &str = "0.0.0.0:6380";
+const DEFAULT_CAPNP_BIND: &str = "0.0.0.0:6381";
 
 #[derive(Debug)]
 struct Config {
+    protocol: String,
     bind: String,
+    capnp_bind: String,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 }
@@ -16,8 +21,52 @@ async fn main() {
         Err(code) => process::exit(code),
     };
 
-    if let Err(err) = janus::listen(&config.bind, config.dbfile, config.wal).await {
-        eprintln!("janus: failed to listen on {}: {err}", config.bind);
+    if config.protocol != "resp" && !cfg!(feature = "capnp") {
+        eprintln!(
+            "janus: protocol '{}' requires a build with --features capnp",
+            config.protocol
+        );
+        process::exit(2);
+    }
+    #[cfg(not(feature = "capnp"))]
+    let _ = &config.capnp_bind;
+
+    let result = match config.protocol.as_str() {
+        "resp" => janus::listen(&config.bind, config.dbfile, config.wal).await,
+        #[cfg(feature = "capnp")]
+        "capnp" => match TcpListener::bind(&config.capnp_bind).await {
+            Ok(listener) => {
+                eprintln!("janus: Cap'n Proto RPC listening on {}", config.capnp_bind);
+                janus::serve_with_capnp(listener, config.dbfile, config.wal).await
+            }
+            Err(error) => Err(error),
+        },
+        #[cfg(feature = "capnp")]
+        "both" => {
+            let resp_listener = match TcpListener::bind(&config.bind).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!("janus: failed to listen on {}: {error}", config.bind);
+                    process::exit(1);
+                }
+            };
+            let capnp_listener = match TcpListener::bind(&config.capnp_bind).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!("janus: failed to listen on {}: {error}", config.capnp_bind);
+                    process::exit(1);
+                }
+            };
+            eprintln!("janus: RESP listening on {}", config.bind);
+            eprintln!("janus: Cap'n Proto RPC listening on {}", config.capnp_bind);
+            janus::serve_with_protocols(resp_listener, capnp_listener, config.dbfile, config.wal)
+                .await
+        }
+        _ => unreachable!("protocol validated by resolve_config"),
+    };
+
+    if let Err(err) = result {
+        eprintln!("janus: server failed: {err}");
         process::exit(1);
     }
 }
@@ -27,7 +76,9 @@ async fn main() {
 /// `--dbfile` / `JANUS_DBFILE` and `--wal` / `JANUS_WAL` cannot both be set
 /// (`ERR conflicting persistence`).
 fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
+    let mut protocol_from_cli: Option<String> = None;
     let mut bind_from_cli: Option<String> = None;
+    let mut capnp_bind_from_cli: Option<String> = None;
     let mut dbfile_from_cli: Option<PathBuf> = None;
     let mut wal_from_cli: Option<PathBuf> = None;
     let mut i = 0;
@@ -47,6 +98,30 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
             }
             other if other.starts_with("--bind=") => {
                 bind_from_cli = Some(other.trim_start_matches("--bind=").to_string());
+                i += 1;
+            }
+            "--protocol" => {
+                let value = args.get(i + 1).cloned().ok_or_else(|| {
+                    eprintln!("janus: --protocol requires resp, capnp, or both");
+                    2
+                })?;
+                protocol_from_cli = Some(value);
+                i += 2;
+            }
+            other if other.starts_with("--protocol=") => {
+                protocol_from_cli = Some(other.trim_start_matches("--protocol=").to_string());
+                i += 1;
+            }
+            "--capnp-bind" => {
+                let value = args.get(i + 1).cloned().ok_or_else(|| {
+                    eprintln!("janus: --capnp-bind requires an address (example: 0.0.0.0:6381)");
+                    2
+                })?;
+                capnp_bind_from_cli = Some(value);
+                i += 2;
+            }
+            other if other.starts_with("--capnp-bind=") => {
+                capnp_bind_from_cli = Some(other.trim_start_matches("--capnp-bind=").to_string());
                 i += 1;
             }
             "--dbfile" => {
@@ -85,6 +160,17 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
         .or_else(|| env::var("JANUS_BIND").ok())
         .unwrap_or_else(|| DEFAULT_BIND.to_string());
 
+    let protocol = protocol_from_cli
+        .or_else(|| env::var("JANUS_PROTOCOL").ok())
+        .unwrap_or_else(|| "resp".to_string());
+    if !matches!(protocol.as_str(), "resp" | "capnp" | "both") {
+        eprintln!("janus: invalid protocol '{protocol}'; expected resp, capnp, or both");
+        return Err(2);
+    }
+    let capnp_bind = capnp_bind_from_cli
+        .or_else(|| env::var("JANUS_CAPNP_BIND").ok())
+        .unwrap_or_else(|| DEFAULT_CAPNP_BIND.to_string());
+
     let dbfile = dbfile_from_cli.or_else(|| env::var("JANUS_DBFILE").ok().map(PathBuf::from));
     let wal = wal_from_cli.or_else(|| env::var("JANUS_WAL").ok().map(PathBuf::from));
 
@@ -94,7 +180,9 @@ fn resolve_config(args: Vec<String>) -> Result<Config, i32> {
     }
 
     Ok(Config {
+        protocol,
         bind,
+        capnp_bind,
         dbfile,
         wal,
     })
@@ -106,16 +194,20 @@ fn print_help() {
 Janus — modular data kernel
 
 USAGE:
-    janus [--bind <ADDR>] [--dbfile <PATH> | --wal <PATH>]
+    janus [--protocol <resp|capnp|both>] [--bind <ADDR>] [--capnp-bind <ADDR>] [--dbfile <PATH> | --wal <PATH>]
 
 OPTIONS:
     --bind <ADDR>     Listen address (default: {DEFAULT_BIND})
+    --protocol <MODE> Listener protocol: resp (default), capnp, or both (requires --features capnp)
+    --capnp-bind <ADDR> Cap'n Proto RPC address (default: {DEFAULT_CAPNP_BIND})
     --dbfile <PATH>   Snapshot file for SAVE / boot load (optional)
     --wal <PATH>      Append-only WAL for mutation replay on boot (optional)
     -h, --help        Show help
 
 ENVIRONMENT:
     JANUS_BIND        Listen address when --bind is not set
+    JANUS_PROTOCOL    Listener protocol when --protocol is not set
+    JANUS_CAPNP_BIND   Cap'n Proto RPC address when --capnp-bind is not set
     JANUS_DBFILE      Snapshot path when --dbfile is not set
     JANUS_WAL         WAL path when --wal is not set
 
@@ -133,8 +225,27 @@ mod cli_tests {
     fn resolve_config_uses_cli_bind_over_default() {
         let cfg = resolve_config(vec!["--bind".into(), "127.0.0.1:7000".into()]).unwrap();
         assert_eq!(cfg.bind, "127.0.0.1:7000");
+        assert_eq!(cfg.protocol, "resp");
+        assert_eq!(cfg.capnp_bind, DEFAULT_CAPNP_BIND);
         assert!(cfg.dbfile.is_none());
         assert!(cfg.wal.is_none());
+    }
+
+    #[test]
+    fn resolve_config_accepts_capnp_modes_and_bind() {
+        let cfg = resolve_config(vec![
+            "--protocol=both".into(),
+            "--capnp-bind".into(),
+            "127.0.0.1:7001".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg.protocol, "both");
+        assert_eq!(cfg.capnp_bind, "127.0.0.1:7001");
+    }
+
+    #[test]
+    fn resolve_config_rejects_unknown_protocol() {
+        assert_eq!(resolve_config(vec!["--protocol=auto".into()]).unwrap_err(), 2);
     }
 
     #[test]

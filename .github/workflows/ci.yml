@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+      - name: Install Cap'n Proto compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
       - name: Cargo test
         run: cargo test --workspace --all-features
       - name: Cargo check
@@ -52,6 +54,21 @@ jobs:
                       raise
                   time.sleep(0.5)
           PY
+
+      - name: Docker Cap'n Proto dual-listener smoke test
+        run: |
+          docker build --build-arg JANUS_FEATURES=capnp -t janus:capnp .
+          docker run --rm -d --name janus-ci-capnp -e JANUS_PROTOCOL=both -p 16380:6380 -p 16381:6381 janus:capnp
+          cleanup() { docker stop janus-ci-capnp >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if docker logs janus-ci-capnp 2>&1 | grep -q "Cap'n Proto RPC listening on 0.0.0.0:6381"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs janus-ci-capnp
+          exit 1
 
   no-tool-coauthor:
     runs-on: ubuntu-latest

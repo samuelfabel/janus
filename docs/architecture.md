@@ -47,6 +47,14 @@ endpoint is restricted to ALPN `h3` and TLS 1.3, with 0-RTT disabled. The root
 library's `serve_with_http3` runs the existing TCP/RESP listener and HTTP/3
 endpoint against one shared Kernel. The CLI and default server remain TCP + RESP.
 
+The optional `janus-capnp-rpc` crate provides a Cap'n Proto RPC Level 1
+two-party TCP edge behind the root Cargo feature `capnp`. Each accepted
+connection bootstraps a `Janus` capability whose `execute` method maps the
+existing domain commands and responses to the same shared Kernel. RESP remains
+the default; the CLI can select Cap'n Proto alone or both protocols on
+separate listeners. The schema compiler is required only when the feature is
+enabled during a build.
+
 Examples:
 
 - RESP parser
@@ -169,7 +177,8 @@ flowchart TD
 | `janus-protocol` | `Protocol` trait, RESP instance, and HTTP key/value adapter | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
 | `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
-| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`) and CLI binary | `janus-transport`, `janus-http3`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
+| `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one root capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
+| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`, optional Cap'n Proto composition) and CLI binary | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
 
 Rules:
 
@@ -177,6 +186,7 @@ Rules:
 - The transport never sees storage, snapshots or the WAL; persistence is wired only in the composition root.
 - `janus-transport`, `janus-http3` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
 - HTTP/3 remains an opt-in library edge; the command-line composition continues to use TCP + RESP.
+- Cap'n Proto RPC remains optional; RESP is the default mode, while `capnp` and `both` use a dedicated TCP listener and the same Kernel.
 - Tests that need an upper layer use dev-dependencies (for example, serializer tests that drive the Kernel), which do not change the production graph.
 
 # Modularity

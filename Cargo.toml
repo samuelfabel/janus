@@ -16,6 +16,7 @@ janus-serializer = { path = "crates/janus-serializer" }
 janus-protocol = { path = "crates/janus-protocol" }
 janus-transport = { path = "crates/janus-transport" }
 janus-http3 = { path = "crates/janus-http3" }
+janus-capnp-rpc = { path = "crates/janus-capnp-rpc", default-features = false }
 http = "1"
 bytes = "1"
 
@@ -30,6 +31,10 @@ readme = "README.md"
 keywords = ["cache", "storage", "kernel", "resp"]
 categories = ["database-implementations", "network-programming"]
 
+[features]
+default = []
+capnp = ["dep:janus-capnp-rpc", "janus-capnp-rpc/rpc"]
+
 [dependencies]
 tokio = { workspace = true }
 janus-storage = { workspace = true }
@@ -37,6 +42,7 @@ janus-kernel = { workspace = true }
 janus-transport = { workspace = true }
 janus-http3 = { workspace = true }
 janus-protocol = { workspace = true }
+janus-capnp-rpc = { workspace = true, optional = true, default-features = false }
 
 [dev-dependencies]
 bytes = { workspace = true }

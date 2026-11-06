@@ -1,7 +1,7 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
 use std::sync::{Arc, Mutex};
 
-use janus_kernel::{Kernel, Role, is_write, lock_kernel};
+use janus_kernel::{is_write, lock_kernel, Kernel, Role};
 use janus_serializer::{DecodeOutcome, Serializer};
 use janus_types::{Command, Response};
 
@@ -52,7 +52,16 @@ where
 
 /// Run `command` on the locked kernel, applying the per-connection gates:
 /// NOAUTH first, then NOPERM for writes on a read-only connection.
-fn execute_gated(kernel: &mut Kernel, role: &mut Option<Role>, command: &Command<'_>) -> Response {
+/// Execute one domain command with the authentication and authorization gates
+/// associated with a protocol session.
+///
+/// Other protocol frontends can reuse the same per-connection role behavior
+/// while keeping wire decoding and response encoding at their own boundary.
+pub fn execute_gated(
+    kernel: &mut Kernel,
+    role: &mut Option<Role>,
+    command: &Command<'_>,
+) -> Response {
     if kernel.auth_required() {
         match (*role, command) {
             (None, Command::Auth { .. }) => {}
@@ -383,7 +392,9 @@ mod tests {
 
     fn run(p: &mut RespProtocol<RespSerializer>, input: &[u8]) -> Vec<Vec<u8>> {
         let mut responses = Vec::new();
-        let offset = p.execute(input, |out| responses.push(out.to_vec())).unwrap();
+        let offset = p
+            .execute(input, |out| responses.push(out.to_vec()))
+            .unwrap();
         assert_eq!(offset, input.len());
         responses
     }

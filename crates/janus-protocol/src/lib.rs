@@ -5,7 +5,7 @@ pub mod resp;
 pub mod types;
 
 pub use http_kv::{HttpKvProtocol, HttpProtocol};
-pub use resp::RespProtocol;
+pub use resp::{execute_gated, RespProtocol};
 pub use types::ProtocolError;
 
 /// One connection's protocol orchestrator (no sockets).

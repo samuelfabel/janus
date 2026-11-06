@@ -1,0 +1,29 @@
+[package]
+name = "janus-capnp-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional Cap'n Proto RPC interface for Janus"
+build = "build.rs"
+
+[features]
+default = []
+rpc = ["dep:capnp", "dep:capnp-rpc", "dep:futures", "dep:tokio-util"]
+
+[dependencies]
+janus-kernel = { workspace = true }
+janus-protocol = { workspace = true }
+janus-types = { workspace = true }
+tokio = { workspace = true }
+capnp = { version = "=0.27.3", optional = true }
+capnp-rpc = { version = "=0.27.3", optional = true }
+futures = { version = "0.3", optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+
+[build-dependencies]
+capnpc = "=0.27.0"
+
+[dev-dependencies]
+janus-storage = { workspace = true }
+janus-transport = { workspace = true }

@@ -7,7 +7,15 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src
 
-RUN cargo build --release
+ARG JANUS_FEATURES=
+RUN if [ -n "$JANUS_FEATURES" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends capnproto \
+        && rm -rf /var/lib/apt/lists/* \
+        && cargo build --release --features "$JANUS_FEATURES"; \
+    else \
+        cargo build --release; \
+    fi
 
 FROM debian:bookworm-slim AS runtime
 
@@ -22,5 +30,6 @@ WORKDIR /app
 
 ENV JANUS_BIND=0.0.0.0:6380
 EXPOSE 6380
+EXPOSE 6381
 
 ENTRYPOINT ["/usr/local/bin/janus"]

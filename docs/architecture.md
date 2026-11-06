@@ -55,6 +55,11 @@ the default; the CLI can select Cap'n Proto alone or both protocols on
 separate listeners. The schema compiler is required only when the feature is
 enabled during a build.
 
+The optional `janus-grpc` crate exposes the command surface as a bidirectional
+gRPC session over HTTP/2. Each stream owns its authentication role and routes
+commands through the same shared Kernel. The CLI can bind gRPC alone, with
+RESP, or with the other protocol listeners.
+
 Examples:
 
 - RESP parser
@@ -178,7 +183,8 @@ flowchart TD
 | `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
 | `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one root capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
-| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`, optional Cap'n Proto composition) and CLI binary | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
+| `janus-grpc` | Optional bidirectional gRPC session edge using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
+| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`, optional RPC compositions) and CLI binary | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
 
 Rules:
 
@@ -187,6 +193,7 @@ Rules:
 - `janus-transport`, `janus-http3` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
 - HTTP/3 remains an opt-in library edge; the command-line composition continues to use TCP + RESP.
 - Cap'n Proto RPC remains optional; RESP is the default mode, while `capnp` and `both` use a dedicated TCP listener and the same Kernel.
+- gRPC remains optional; RESP is the default mode, while `grpc`, `resp+grpc`, and `all` use a dedicated gRPC listener and the same Kernel.
 - Tests that need an upper layer use dev-dependencies (for example, serializer tests that drive the Kernel), which do not change the production graph.
 
 # Modularity

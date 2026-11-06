@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package janus.v1;
+
+service Janus {
+  rpc Execute(stream Command) returns (stream Response);
+}
+
+message Command {
+  oneof command {
+    SetCommand set = 1;
+    bytes get = 2;
+    bytes delete = 3;
+    ExpireCommand expire = 4;
+    bytes ttl = 5;
+    Empty save = 6;
+    Empty multi = 7;
+    Empty exec = 8;
+    Empty discard = 9;
+    Empty info = 10;
+    Empty traces = 11;
+    bytes auth = 12;
+  }
+}
+
+message SetCommand {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message ExpireCommand {
+  bytes key = 1;
+  uint64 seconds = 2;
+}
+
+message Empty {}
+
+message Response {
+  oneof response {
+    Empty empty = 1;
+    Value value = 2;
+    bool deleted = 3;
+    int64 integer = 4;
+    Empty queued = 5;
+    Array array = 6;
+    string error = 7;
+  }
+}
+
+message Value {
+  bool present = 1;
+  bytes data = 2;
+}
+
+message Array {
+  repeated Response items = 1;
+}

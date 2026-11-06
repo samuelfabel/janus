@@ -17,8 +17,6 @@ use janus_storage::{
 };
 use tokio::net::TcpListener;
 #[cfg(feature = "capnp")]
-use tokio::net::TcpListener as CapnpTcpListener;
-#[cfg(feature = "capnp")]
 use tokio::task::LocalSet;
 
 /// Default production storage plugin (`MemoryStorageEngine`).
@@ -132,7 +130,7 @@ pub async fn serve_with_http3(
 /// [`serve_with_protocols`].
 #[cfg(feature = "capnp")]
 pub async fn serve_with_capnp(
-    listener: CapnpTcpListener,
+    listener: TcpListener,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 ) -> io::Result<()> {
@@ -146,7 +144,7 @@ pub async fn serve_with_capnp(
 #[cfg(feature = "capnp")]
 pub async fn serve_with_protocols(
     resp_listener: TcpListener,
-    capnp_listener: CapnpTcpListener,
+    capnp_listener: TcpListener,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 ) -> io::Result<()> {
@@ -156,6 +154,53 @@ pub async fn serve_with_protocols(
             let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
             let capnp = janus_capnp_rpc::accept_loop(capnp_listener, kernel);
             tokio::try_join!(resp, capnp)?;
+            Ok(())
+        })
+        .await
+}
+
+/// Accept gRPC sessions on an already-bound TCP listener.
+#[cfg(feature = "grpc")]
+pub async fn serve_with_grpc(
+    listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    janus_grpc::rpc::accept_loop(listener, kernel).await
+}
+
+/// Serve RESP and gRPC on separate TCP listeners with one Kernel.
+#[cfg(feature = "grpc")]
+pub async fn serve_with_resp_and_grpc(
+    resp_listener: TcpListener,
+    grpc_listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
+    let grpc = janus_grpc::rpc::accept_loop(grpc_listener, kernel);
+    tokio::try_join!(resp, grpc)?;
+    Ok(())
+}
+
+/// Serve RESP, Cap'n Proto RPC and gRPC on separate listeners with one Kernel.
+#[cfg(all(feature = "capnp", feature = "grpc"))]
+pub async fn serve_with_all_protocols(
+    resp_listener: TcpListener,
+    capnp_listener: TcpListener,
+    grpc_listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    LocalSet::new()
+        .run_until(async move {
+            let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
+            let capnp = janus_capnp_rpc::accept_loop(capnp_listener, Arc::clone(&kernel));
+            let grpc = janus_grpc::rpc::accept_loop(grpc_listener, kernel);
+            tokio::try_join!(resp, capnp, grpc)?;
             Ok(())
         })
         .await

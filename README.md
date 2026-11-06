@@ -19,6 +19,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Library callers can provide a per-connection protocol factory with `listen_with_protocol` or `serve_with_protocol`; the command-line server remains TCP + RESP
 - An experimental, library-only HTTP/3 edge is available through `janus-http3` and `serve_with_http3`; it uses caller-supplied TLS certificates and leaves the CLI on TCP + RESP
 - Optional Cap'n Proto RPC edge (`janus-capnp-rpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features capnp`, then select Cap'n Proto alone or alongside RESP while both listeners share one Kernel
+- Optional gRPC edge (`janus-grpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features grpc`, then select gRPC alone or alongside RESP while both listeners share one Kernel
 - Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
 - Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
 - Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
@@ -54,7 +55,7 @@ TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI`
 
 ## Install / build
 
-Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021). Tokio is pulled in via `Cargo.toml` for the async TCP edge. Enabling Cap'n Proto RPC also requires the Cap'n Proto schema compiler (`capnp`) during the build; the default RESP build does not.
+Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021). Building with the `grpc` feature requires Rust 1.88 or newer and `protoc`; the optional Cap'n Proto RPC feature requires the `capnp` schema compiler. The default RESP build does not require either compiler.
 
 ```bash
 git clone https://github.com/samuelfabel/janus.git
@@ -77,13 +78,16 @@ Janus is a Cargo workspace with one crate per layer. Dependencies point downward
 | `janus-transport` | Tokio TCP accept loop + connection instance | `janus-protocol`, `janus-serializer`, `janus-kernel` |
 | `janus-http3` | Optional HTTP/3 server edge over Quinn | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one Janus capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
-| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc`, `janus-protocol`, `janus-kernel`, `janus-storage` |
+| `janus-grpc` | Optional bidirectional gRPC session API using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
+| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc`, `janus-protocol`, `janus-kernel`, `janus-storage` |
 
 `janus-transport`, `janus-http3`, and the root package depend on Tokio. TCP end-to-end tests live in `tests/e2e.rs`; HTTP/3 loopback coverage lives in `crates/janus-http3/tests/`.
 
 The HTTP/3 endpoint is experimental and opt-in for Rust library callers. `janus-http3::bind` configures a Quinn endpoint with ALPN `h3`, TLS 1.3, and 0-RTT disabled. Pass it with a bound TCP listener to `janus::serve_with_http3` to share one Kernel between RESP and HTTP/3. The supported HTTP routes are `GET`, `PUT`, and `DELETE /keys/{key}`; values are opaque bytes and request bodies are limited to 1 MiB. The command-line server, Docker image, and Compose configuration continue to expose TCP + RESP only.
 
 The optional Cap'n Proto edge uses the Rust `capnp-rpc` Level 1 two-party runtime. Its schema is in `crates/janus-capnp-rpc/schema/janus.capnp`; clients bootstrap a `Janus` capability and invoke `execute` with a supported command. Values and keys remain opaque bytes and all calls reach the same domain Kernel as RESP. The Cap'n Proto listener uses a separate TCP address (default `0.0.0.0:6381`) and does not add TLS.
+
+The optional gRPC edge exposes a bidirectional `Janus.Execute` stream defined in `crates/janus-grpc/proto/janus.proto`. Each stream is one command session, so `AUTH` state belongs to that session and every command uses the same Kernel as RESP. The gRPC listener uses a separate TCP address (default `0.0.0.0:6382`). TLS is not configured by the built-in listener.
 
 ## Run the server
 
@@ -110,9 +114,18 @@ cargo run --release --features capnp -- --protocol capnp --capnp-bind 127.0.0.1:
 
 # RESP and Cap'n Proto RPC on independent TCP listeners with one Kernel
 cargo run --release --features capnp -- --protocol both --bind 127.0.0.1:6380 --capnp-bind 127.0.0.1:6381
+
+# optional gRPC listener only
+cargo run --release --features grpc -- --protocol grpc --grpc-bind 127.0.0.1:6382
+
+# RESP and gRPC over separate listeners with one Kernel
+cargo run --release --features grpc -- --protocol resp+grpc --bind 127.0.0.1:6380 --grpc-bind 127.0.0.1:6382
+
+# enable all three protocol edges on separate listeners
+cargo run --release --features capnp,grpc -- --protocol all
 ```
 
-`JANUS_PROTOCOL=capnp` / `JANUS_PROTOCOL=both` select the same modes through the environment. `JANUS_CAPNP_BIND` configures the Cap'n Proto RPC address. Asking for either mode without compiling the feature exits with an error. To build a Docker image with Cap'n Proto enabled, use `docker build --build-arg JANUS_FEATURES=capnp -t janus:capnp .`.
+`JANUS_PROTOCOL` selects the same modes through the environment. `JANUS_CAPNP_BIND` and `JANUS_GRPC_BIND` configure their respective listener addresses. Requesting a protocol without compiling its feature exits with an error. To build a Docker image with both RPC features enabled, use `docker build --build-arg JANUS_FEATURES=capnp,grpc -t janus:rpc .`.
 
 Quick check with any RESP client (optional), for example:
 

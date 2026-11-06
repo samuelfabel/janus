@@ -10,6 +10,7 @@ description = "Per-connection protocol instance: decode, kernel, encode"
 janus-types = { workspace = true }
 janus-serializer = { workspace = true }
 janus-kernel = { workspace = true }
+http = { workspace = true }
 
 [dev-dependencies]
 janus-storage = { workspace = true }

@@ -14,9 +14,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
       - name: Cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --all-features
       - name: Docker build and TCP smoke test
         run: |
           docker build -t janus:ci .

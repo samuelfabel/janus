@@ -123,6 +123,32 @@ pub async fn serve_with_http3(
     Ok(())
 }
 
+/// Accept REST requests on an already-bound listener.
+#[cfg(feature = "rest")]
+pub async fn serve_with_rest(
+    listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    janus_rest::accept_loop(listener, kernel).await
+}
+
+/// Serve RESP and REST on separate TCP listeners with one Kernel.
+#[cfg(feature = "rest")]
+pub async fn serve_with_resp_and_rest(
+    resp_listener: TcpListener,
+    rest_listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
+    let rest = janus_rest::accept_loop(rest_listener, kernel);
+    tokio::try_join!(resp, rest)?;
+    Ok(())
+}
+
 /// Accept Cap'n Proto RPC sessions on an already-bound TCP listener.
 ///
 /// This API is available when the crate is built with the `capnp` feature.
@@ -186,11 +212,12 @@ pub async fn serve_with_resp_and_grpc(
 }
 
 /// Serve RESP, Cap'n Proto RPC and gRPC on separate listeners with one Kernel.
-#[cfg(all(feature = "capnp", feature = "grpc"))]
+#[cfg(all(feature = "capnp", feature = "grpc", feature = "rest"))]
 pub async fn serve_with_all_protocols(
     resp_listener: TcpListener,
     capnp_listener: TcpListener,
     grpc_listener: TcpListener,
+    rest_listener: TcpListener,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 ) -> io::Result<()> {
@@ -199,8 +226,9 @@ pub async fn serve_with_all_protocols(
         .run_until(async move {
             let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
             let capnp = janus_capnp_rpc::accept_loop(capnp_listener, Arc::clone(&kernel));
-            let grpc = janus_grpc::rpc::accept_loop(grpc_listener, kernel);
-            tokio::try_join!(resp, capnp, grpc)?;
+            let grpc = janus_grpc::rpc::accept_loop(grpc_listener, Arc::clone(&kernel));
+            let rest = janus_rest::accept_loop(rest_listener, kernel);
+            tokio::try_join!(resp, capnp, grpc, rest)?;
             Ok(())
         })
         .await

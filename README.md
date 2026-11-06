@@ -12,7 +12,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Layered design: transport, protocol, serializer, kernel, storage
 - First milestone targets TCP + RESP + in-memory key/value (`SET` / `GET` / `DELETE` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH`)
 - Modular storage: `StorageEngine` trait + `Box<dyn StorageEngine>` in the Kernel (dependency inversion)
-- Default plugin: `MemoryStorageEngine` (`HashMap`); pedagogical second plugin: `BTreeStorageEngine` (`BTreeMap`)
+- Default plugin: `MemoryStorageEngine` (`HashMap`); alternative: `BTreeStorageEngine` (`BTreeMap`)
 - Optional snapshot persistence via `--dbfile` / `JANUS_DBFILE`
 - Optional append-only WAL via `--wal` / `JANUS_WAL` (mutually exclusive with `--dbfile`)
 - Concurrent TCP clients share one in-memory store (`Arc<Mutex<Kernel>>`) over Tokio async TCP
@@ -21,11 +21,11 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional Cap'n Proto RPC edge (`janus-capnp-rpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features capnp`, then select Cap'n Proto alone or alongside RESP while both listeners share one Kernel
 - Optional gRPC edge (`janus-grpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features grpc`, then select gRPC alone or alongside RESP while both listeners share one Kernel
 - Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
-- Pedagogical **transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID claims)
-- Pedagogical **metrics**: Kernel counters inspected via `INFO` (not Prometheus / OpenTelemetry)
-- Pedagogical **tracing**: Kernel span ring buffer inspected via `TRACES` (not OTLP / W3C Trace Context)
-- Pedagogical **authentication**: optional `requirepass` + `AUTH <password>` with a per-connection `NOAUTH` gate (no ACL / users / TLS)
-- Pedagogical **authorization**: `Full` / `ReadOnly` roles chosen by the password used in `AUTH`, with a per-connection `NOPERM` gate for writes (no ACL / users / TLS)
+- **Transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID guarantees)
+- **Metrics**: Kernel counters exposed through `INFO`
+- **Tracing**: Kernel span ring buffer exposed through `TRACES`
+- **Authentication**: optional `requirepass` + `AUTH <password>` with a per-connection `NOAUTH` gate
+- **Authorization**: `Full` / `ReadOnly` roles selected by the password used in `AUTH`, with a per-connection `NOPERM` gate for writes
 
 This project does **not**:
 
@@ -41,17 +41,17 @@ This project does **not**:
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
-**Replication (Phase 10, pedagogical):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). Covered by the harness under `crates/janus-kernel/src/replication/harness.rs` — not a production cluster, Raft, failover, or sharding.
+**Replication (Phase 10):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). This does not provide a production cluster, Raft, failover, or sharding.
 
-**Transactions (pedagogical):** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. Covered by the Tokio TCP e2e harness — not WATCH, nested MULTI, or distributed transactions.
+**Transactions:** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. WATCH, nested MULTI, and distributed transactions are not supported.
 
-**Metrics (pedagogical):** the Kernel tracks `total_commands`, `keyspace_hits`, and `keyspace_misses`. `INFO` returns a `# Stats` text bulk string with those counters. Covered by the Tokio TCP e2e harness — not Prometheus, OpenTelemetry, histograms, or tracing.
+**Metrics:** the Kernel tracks `total_commands`, `keyspace_hits`, and `keyspace_misses`. `INFO` returns a `# Stats` text bulk string with those counters. Prometheus, OpenTelemetry, and histograms are not supported.
 
-**Tracing (pedagogical):** the Kernel keeps a fixed-capacity ring buffer of command spans (`id` + command name). `TRACES` returns a `# Traces` text bulk string with the recent sequence. Covered by the Tokio TCP e2e harness — not OpenTelemetry, OTLP, or W3C Trace Context.
+**Tracing:** the Kernel keeps a fixed-capacity ring buffer of command spans (`id` + command name). `TRACES` returns a `# Traces` text bulk string with the recent sequence. OpenTelemetry, OTLP, and W3C Trace Context are not supported.
 
-**Authentication (pedagogical):** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each TCP/RESP connection starts unauthenticated and every command except `AUTH <password>` returns `-NOAUTH Authentication required.`; a matching `AUTH` returns `+OK` and unlocks that connection only, a wrong one returns `-ERR invalid password`. Without a requirepass the server stays open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected, never queued. The default `cargo run` server has **no** password; requirepass is set in the composition root and is covered by the Tokio TCP e2e harness — not ACL, multiple users, `AUTH username password`, or TLS on the default TCP/RESP listener.
+**Authentication:** the Kernel accepts an optional `requirepass` (`Kernel::with_requirepass`). When set, each TCP/RESP connection starts unauthenticated and commands other than `AUTH <password>` return `-NOAUTH Authentication required.` A valid password unlocks that connection; an invalid password returns `-ERR invalid password`. Without a configured password, the server remains open and `AUTH` returns `-ERR AUTH called without any password configured`. `AUTH` inside `MULTI` is rejected. The default `cargo run` server has no password. ACLs, multiple users, `AUTH username password`, and TLS on the default TCP/RESP listener are not supported.
 
-**Authorization (pedagogical):** next to `requirepass` (role `Full`), the Kernel accepts an optional read-only password (`Kernel::with_readonly_pass`, role `ReadOnly`). The password used in the last successful `AUTH` sets the role of that connection; a failed `AUTH` keeps the current role. A `ReadOnly` connection can run reads (`GET`, `TTL`, `INFO`, `TRACES`) and transaction control, but write commands (`SET`, `DEL`, `EXPIRE`, `SAVE`) return `-NOPERM this connection is read-only` without reaching the Kernel: inside `MULTI` they are not queued, and they are not counted in `INFO` or recorded in `TRACES`. With only a read-only password configured, every authenticated connection is `ReadOnly`. Roles are per connection and covered by the Tokio TCP e2e harness; the default `cargo run` server has **no** passwords — not ACLs, named users, Redis command categories, or TLS.
+**Authorization:** alongside `requirepass` (role `Full`), the Kernel accepts an optional read-only password (`Kernel::with_readonly_pass`, role `ReadOnly`). The last successful `AUTH` sets the connection role; a failed `AUTH` leaves it unchanged. `ReadOnly` connections can run reads (`GET`, `TTL`, `INFO`, `TRACES`) and transaction control. Write commands (`SET`, `DEL`, `EXPIRE`, `SAVE`) return `-NOPERM this connection is read-only`; inside `MULTI`, they are neither queued nor counted in `INFO` or `TRACES`. If only a read-only password is configured, all authenticated connections use the `ReadOnly` role. The default `cargo run` server has no passwords. Named users, command categories, and TLS are not supported.
 
 ## Install / build
 

@@ -250,14 +250,14 @@ async fn execute(client: &janus_capnp::janus::Client, command: RpcCommand<'_>) -
 fn write_command(builder: &mut janus_capnp::command::Builder<'_>, command: RpcCommand<'_>) {
     match command {
         RpcCommand::Set(key, value) => {
-            let mut set = builder.init_set();
+            let mut set = builder.reborrow().init_set();
             set.set_key(key);
             set.set_value(value);
         }
         RpcCommand::Get(key) => builder.set_get(key),
         RpcCommand::Delete(key) => builder.set_delete(key),
         RpcCommand::Expire(key, seconds) => {
-            let mut expire = builder.init_expire();
+            let mut expire = builder.reborrow().init_expire();
             expire.set_key(key);
             expire.set_seconds(seconds);
         }
@@ -292,7 +292,7 @@ fn read_response(reader: janus_capnp::response::Reader<'_>) -> capnp::Result<Rpc
             let items = items?;
             let mut response = Vec::with_capacity(items.len() as usize);
             for item in items.iter() {
-                response.push(read_response(item?)?);
+                response.push(read_response(item)?);
             }
             RpcResponse::Array(response)
         }

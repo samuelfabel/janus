@@ -1,9 +1,15 @@
 services:
   janus:
-    build: .
+    build:
+      context: .
+      args:
+        JANUS_FEATURES: ${JANUS_FEATURES:-}
     image: janus:local
     ports:
       - "6380:6380"
+      - "6383:6383"
     environment:
       JANUS_BIND: "0.0.0.0:6380"
+      JANUS_PROTOCOL: ${JANUS_PROTOCOL:-resp}
+      JANUS_REST_BIND: "0.0.0.0:6383"
     restart: unless-stopped

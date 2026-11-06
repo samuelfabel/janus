@@ -18,8 +18,10 @@ janus-transport = { path = "crates/janus-transport" }
 janus-http3 = { path = "crates/janus-http3" }
 janus-capnp-rpc = { path = "crates/janus-capnp-rpc", default-features = false }
 janus-grpc = { path = "crates/janus-grpc", default-features = false }
+janus-rest = { path = "crates/janus-rest" }
 http = "1"
 bytes = "1"
+serde_json = "1"
 
 [package]
 name = "janus"
@@ -36,6 +38,7 @@ categories = ["database-implementations", "network-programming"]
 default = []
 capnp = ["dep:janus-capnp-rpc", "janus-capnp-rpc/rpc"]
 grpc = ["dep:janus-grpc", "janus-grpc/rpc"]
+rest = ["dep:janus-rest"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -46,6 +49,7 @@ janus-http3 = { workspace = true }
 janus-protocol = { workspace = true }
 janus-capnp-rpc = { workspace = true, optional = true, default-features = false }
 janus-grpc = { workspace = true, optional = true, default-features = false }
+janus-rest = { workspace = true, optional = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

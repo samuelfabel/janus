@@ -55,7 +55,7 @@ TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI`
 
 ## Install / build
 
-Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021). Tokio is pulled in via `Cargo.toml` for the async TCP edge. Enabling Cap'n Proto RPC or gRPC requires the corresponding schema compiler (`capnp` or `protoc`) during the build; the default RESP build does not.
+Requirements: [Rust](https://www.rust-lang.org/tools/install) (stable, edition 2021). Building with the `grpc` feature requires Rust 1.88 or newer and `protoc`; the optional Cap'n Proto RPC feature requires the `capnp` schema compiler. The default RESP build does not require either compiler.
 
 ```bash
 git clone https://github.com/samuelfabel/janus.git

@@ -60,6 +60,10 @@ gRPC session over HTTP/2. Each stream owns its authentication role and routes
 commands through the same shared Kernel. The CLI can bind gRPC alone, with
 RESP, or with the other protocol listeners.
 
+The optional `janus-rest` crate serves the HTTP route adapter over HTTP/1.1.
+It maps the key, TTL, persistence, transaction, metrics, tracing, and
+authentication operations to REST routes and uses the shared Kernel.
+
 Examples:
 
 - RESP parser
@@ -184,16 +188,18 @@ flowchart TD
 | `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one root capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session edge using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
-| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`, optional RPC compositions) and CLI binary | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
+| `janus-rest` | Optional HTTP/1.1 REST listener | `janus-protocol`, `janus-kernel`, Hyper, Tokio |
+| `janus` | Composition root (`build_storage`, `build_kernel`, `listen`, `serve`, `serve_with_http3`, optional RPC/REST compositions) and CLI binary | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc` / `janus-rest`, `janus-protocol`, `janus-kernel`, `janus-storage`, Tokio |
 
 Rules:
 
 - Lower crates never depend on upper crates; `janus-types` and `janus-storage` have no internal dependencies.
 - The transport never sees storage, snapshots or the WAL; persistence is wired only in the composition root.
 - `janus-transport`, `janus-http3` and the root package depend on Tokio. Kernel, protocol and serializer stay synchronous.
-- HTTP/3 remains an opt-in library edge; the command-line composition continues to use TCP + RESP.
+- HTTP/3 remains an opt-in library edge; RESP remains the default CLI mode.
 - Cap'n Proto RPC remains optional; RESP is the default mode, while `capnp` and `both` use a dedicated TCP listener and the same Kernel.
 - gRPC remains optional; RESP is the default mode, while `grpc`, `resp+grpc`, and `all` use a dedicated gRPC listener and the same Kernel.
+- REST remains optional; RESP is the default mode, while `rest`, `resp+rest`, and `all` use a dedicated HTTP/1.1 listener and the same Kernel.
 - Tests that need an upper layer use dev-dependencies (for example, serializer tests that drive the Kernel), which do not change the production graph.
 
 # Modularity

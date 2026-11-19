@@ -55,16 +55,17 @@ jobs:
                   time.sleep(0.5)
           PY
 
-      - name: Docker RPC listener smoke test
+      - name: Docker optional protocol listener smoke test
         run: |
-          docker build --build-arg JANUS_FEATURES=capnp,grpc -t janus:rpc .
-          docker run --rm -d --name janus-ci-rpc -e JANUS_PROTOCOL=all -p 16380:6380 -p 16381:6381 -p 16382:6382 janus:rpc
+          docker build --build-arg JANUS_FEATURES=capnp,grpc,rest -t janus:all .
+          docker run --rm -d --name janus-ci-rpc -e JANUS_PROTOCOL=all -p 16380:6380 -p 16381:6381 -p 16382:6382 -p 16383:6383 janus:all
           cleanup() { docker stop janus-ci-rpc >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           for attempt in $(seq 1 30); do
             logs=$(docker logs janus-ci-rpc 2>&1)
             if printf '%s\n' "$logs" | grep -q "Cap'n Proto RPC listening on 0.0.0.0:6381" \
-              && printf '%s\n' "$logs" | grep -q "gRPC listening on 0.0.0.0:6382"; then
+              && printf '%s\n' "$logs" | grep -q "gRPC listening on 0.0.0.0:6382" \
+              && printf '%s\n' "$logs" | grep -q "REST listening on 0.0.0.0:6383"; then
               exit 0
             fi
             sleep 1

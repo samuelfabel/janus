@@ -1,0 +1,17 @@
+[package]
+name = "janus-rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional REST API edge for Janus"
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+janus-protocol = { workspace = true }
+janus-kernel = { workspace = true }
+tokio = { workspace = true }

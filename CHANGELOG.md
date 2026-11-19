@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Optional `janus-rest` HTTP/1.1 listener (`--features rest`) for key, TTL, persistence, transaction, metrics, tracing, and authentication routes on a dedicated TCP address
 - Optional `janus-grpc` edge with a bidirectional `Janus.Execute` session for the existing command surface; enable with `--features grpc` (Rust 1.88+) and select `grpc` or `resp+grpc` on dedicated TCP listeners sharing the same Kernel
 - Optional `janus-capnp-rpc` edge with a Cap'n Proto RPC `Janus.execute` capability for the existing command surface; enable with `--features capnp` and select `--protocol capnp` or `both` on separate TCP listeners while sharing the same Kernel
 - Experimental `janus-http3` library crate using Quinn and `h3`, with caller-supplied TLS 1.3 certificates, `h3` ALPN, disabled 0-RTT, a 1 MiB request body limit, and GET/PUT/DELETE key routes; `serve_with_http3` shares the Kernel with TCP/RESP while the CLI remains unchanged

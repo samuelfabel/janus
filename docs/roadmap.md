@@ -250,6 +250,14 @@ stable.
 - Observability
 - Benchmark suite
 - HTTP/3 transport (QUIC)
+- Distributed platform (multi-node cluster beyond the current replication slice)
+- Client integration libraries for major languages
+- Explorer tool (browse, inspect, and operate on data)
+- Additional storage backends beyond the current pluggable engines
+- Docker-based distributed and multi-service deployments
+- Environment simulation mode (dry-run / synthetic ops for test environments)
+- Active cache with queues and consumers for client data-update events
+- Nested key-value cache modality (hash / map under a parent key)
 
 ---
 

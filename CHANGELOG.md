@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `janus-replication` crate with length-prefixed replica-wire framing, `TcpReplicationSink`, and a Tokio replica accept loop; composition root `--role primary|replica`, `--replica-bind`, `--replica-peer` (and `JANUS_*` env) keep the single-node default when unset; TCP e2e in `tests/replica_wire_e2e.rs`
 - Optional `janus-rest` HTTP/1.1 listener (`--features rest`) for key, TTL, persistence, transaction, metrics, tracing, and authentication routes on a dedicated TCP address
 - Optional `janus-grpc` edge with a bidirectional `Janus.Execute` session for the existing command surface; enable with `--features grpc` (Rust 1.88+) and select `grpc` or `resp+grpc` on dedicated TCP listeners sharing the same Kernel
 - Optional `janus-capnp-rpc` edge with a Cap'n Proto RPC `Janus.execute` capability for the existing command surface; enable with `--features capnp` and select `--protocol capnp` or `both` on separate TCP listeners while sharing the same Kernel

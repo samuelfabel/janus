@@ -569,6 +569,7 @@ dependencies = [
  "janus-http3",
  "janus-kernel",
  "janus-protocol",
+ "janus-replication",
  "janus-rest",
  "janus-serializer",
  "janus-storage",
@@ -648,6 +649,16 @@ dependencies = [
  "janus-storage",
  "janus-types",
  "serde_json",
+]
+
+[[package]]
+name = "janus-replication"
+version = "0.1.0"
+dependencies = [
+ "janus-kernel",
+ "janus-storage",
+ "janus-types",
+ "tokio",
 ]
 
 [[package]]

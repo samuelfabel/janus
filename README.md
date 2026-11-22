@@ -21,7 +21,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional Cap'n Proto RPC edge (`janus-capnp-rpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features capnp`, then select Cap'n Proto alone or alongside RESP while both listeners share one Kernel
 - Optional gRPC edge (`janus-grpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features grpc`, then select gRPC alone or alongside RESP while both listeners share one Kernel
 - Optional REST API (`janus-rest`) maps the command surface to HTTP routes on a dedicated TCP listener; enable it with Cargo `--features rest`, then select REST alone or alongside RESP
-- Phase 10 experiment: in-process **primary → replica** via `ReplicationSink` + `apply_replication_record` (no Raft / cluster)
+- Optional TCP **primary → replica** wire (`janus-replication`) with `--role primary|replica`, plus the in-process `ReplicationSink` harness (no Raft / cluster / failover)
 - **Transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID guarantees)
 - **Metrics**: Kernel counters exposed through `INFO`
 - **Tracing**: Kernel span ring buffer exposed through `TRACES`
@@ -42,7 +42,7 @@ This project does **not**:
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
-**Replication (Phase 10):** `cargo run` remains a **single-node** Memory primary. An optional `ReplicationSink` on the Kernel notifies after successful Set / Delete / Expire; a second in-process Kernel can apply those records (`apply_replication_record`). This does not provide a production cluster, Raft, failover, or sharding.
+**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the Kernel emits Set / Delete / Expire over a dedicated TCP wire (not RESP, Cap'n Proto, or WAL). With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire and applies records via `apply_replication_record`; `--bind` remains the RESP client listener. Bootstrap / full sync, failover, and slot redirects are not included yet. An in-process `ReplicationSink` harness remains available for unit tests.
 
 **Transactions:** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. WATCH, nested MULTI, and distributed transactions are not supported.
 
@@ -73,17 +73,18 @@ Janus is a Cargo workspace with one crate per layer. Dependencies point downward
 | --- | --- | --- |
 | `janus-types` | `Command` / `Response` | — |
 | `janus-storage` | `StorageEngine`, Memory / BTree engines, snapshot, WAL | — |
-| `janus-kernel` | Kernel, roles, replication | `janus-types`, `janus-storage` |
+| `janus-kernel` | Kernel, roles, replication trait / records | `janus-types`, `janus-storage` |
 | `janus-serializer` | `Serializer` + RESP codec | `janus-types` |
 | `janus-protocol` | `Protocol` + RESP and HTTP protocol adapters | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop + connection instance | `janus-protocol`, `janus-serializer`, `janus-kernel` |
+| `janus-replication` | Dedicated replica-wire framing, TCP sink, and replica accept loop | `janus-kernel`, Tokio |
 | `janus-http3` | Optional HTTP/3 server edge over Quinn | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one Janus capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session API using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
 | `janus-rest` | Optional HTTP/1.1 REST listener | `janus-protocol`, `janus-kernel`, Hyper, Tokio |
-| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc` / `janus-rest`, `janus-protocol`, `janus-kernel`, `janus-storage` |
+| `janus` (root) | Composition root (`src/lib.rs`) + CLI binary (`src/main.rs`) | `janus-transport`, `janus-replication`, `janus-http3`, optional `janus-capnp-rpc` / `janus-grpc` / `janus-rest`, `janus-protocol`, `janus-kernel`, `janus-storage` |
 
-`janus-transport`, `janus-http3`, `janus-rest`, and the root package depend on Tokio. TCP end-to-end tests live in `tests/e2e.rs`; HTTP/3 loopback coverage lives in `crates/janus-http3/tests/`.
+`janus-transport`, `janus-replication`, `janus-http3`, `janus-rest`, and the root package depend on Tokio. TCP end-to-end tests live in `tests/e2e.rs` and `tests/replica_wire_e2e.rs`; HTTP/3 loopback coverage lives in `crates/janus-http3/tests/`.
 
 The HTTP/3 endpoint is experimental and opt-in for Rust library callers. `janus-http3::bind` configures a Quinn endpoint with ALPN `h3`, TLS 1.3, and 0-RTT disabled. Pass it with a bound TCP listener to `janus::serve_with_http3` to share one Kernel between RESP and HTTP/3. HTTP/3 currently supports `GET`, `PUT`, and `DELETE /keys/{key}`; values are opaque bytes and request bodies are limited to 1 MiB.
 
@@ -133,9 +134,15 @@ cargo run --release --features rest -- --protocol resp+rest --bind 127.0.0.1:638
 
 # enable all optional protocol edges on separate listeners
 cargo run --release --features capnp,grpc,rest -- --protocol all
+
+# replica wire: start the replica first (RESP + dedicated replica bind)
+cargo run --release -- --role replica --bind 127.0.0.1:6380 --replica-bind 127.0.0.1:6390
+
+# then the primary (RESP for clients; pushes frames to the replica wire)
+cargo run --release -- --role primary --bind 127.0.0.1:6381 --replica-peer 127.0.0.1:6390
 ```
 
-`JANUS_PROTOCOL` selects the same modes through the environment. `JANUS_CAPNP_BIND`, `JANUS_GRPC_BIND`, and `JANUS_REST_BIND` configure listener addresses. Requesting a protocol without compiling its feature exits with an error. To build a Docker image with all optional protocol edges enabled, use `docker build --build-arg JANUS_FEATURES=capnp,grpc,rest -t janus:all .`.
+`JANUS_PROTOCOL` selects the same modes through the environment. `JANUS_CAPNP_BIND`, `JANUS_GRPC_BIND`, and `JANUS_REST_BIND` configure listener addresses. `JANUS_ROLE`, `JANUS_REPLICA_BIND`, and `JANUS_REPLICA_PEER` configure the optional replica channel. Requesting a protocol without compiling its feature exits with an error. To build a Docker image with all optional protocol edges enabled, use `docker build --build-arg JANUS_FEATURES=capnp,grpc,rest -t janus:all .`.
 
 Quick check with any RESP client (optional), for example:
 
@@ -153,7 +160,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, and the in-process primary→replica replication harness). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
+Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, the in-process primary→replica harness, and `tests/replica_wire_e2e.rs` for the TCP replica channel). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
 
 ## Docker
 

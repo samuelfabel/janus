@@ -43,10 +43,11 @@ tests/e2e.rs            # Tokio TCP end-to-end tests
 crates/
   janus-types/          # Command, Response
   janus-storage/        # StorageEngine, Memory / BTree engines, snapshot, WAL
-  janus-kernel/         # Kernel, roles, replication
+  janus-kernel/         # Kernel, roles, replication trait / records
   janus-serializer/     # Serializer trait + RESP codec
   janus-protocol/       # Protocol trait + RESP protocol instance
   janus-transport/      # Tokio TCP accept loop + connection instance
+  janus-replication/    # Replica-wire framing, TCP sink, replica accept loop
 docs/                   # architecture, vision, roadmap, ADRs
 ```
 

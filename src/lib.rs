@@ -1,5 +1,5 @@
 //! Composition root: pick the storage plugin, boot persistence, build the
-//! Kernel and hand it to the TCP transport.
+//! Kernel and hand it to the TCP transport (and optional replica wire).
 
 use std::{
     io,
@@ -8,8 +8,9 @@ use std::{
 };
 
 use janus_http3::quic::Endpoint;
-use janus_kernel::Kernel;
+use janus_kernel::{replication::ReplicationSink, Kernel};
 use janus_protocol::HttpKvProtocol;
+use janus_replication::TcpReplicationSink;
 use janus_storage::{
     store::{boot_load, FileSnapshotStore},
     wal::boot_wal,
@@ -50,6 +51,67 @@ pub fn build_kernel(dbfile: Option<PathBuf>, wal: Option<PathBuf>) -> io::Result
         }
         (None, None) => Ok(Kernel::from_boxed(engine)),
     }
+}
+
+/// Build a primary Kernel that emits mutations to `sink` after local apply.
+pub fn build_primary_kernel(
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+    sink: Box<dyn ReplicationSink>,
+) -> io::Result<Kernel> {
+    Ok(build_kernel(dbfile, wal)?.with_replication(sink))
+}
+
+/// Connect a [`TcpReplicationSink`] to `replica_peer` and serve RESP forever.
+pub async fn listen_primary(
+    bind: &str,
+    replica_peer: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let listener = TcpListener::bind(bind).await?;
+    serve_primary(listener, replica_peer, dbfile, wal).await
+}
+
+/// Serve RESP as a primary with a TCP replica sink already connecting to `replica_peer`.
+pub async fn serve_primary(
+    listener: TcpListener,
+    replica_peer: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let peer = replica_peer.to_string();
+    let sink = tokio::task::spawn_blocking(move || TcpReplicationSink::connect(peer))
+        .await
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))??;
+    let kernel = Arc::new(Mutex::new(build_primary_kernel(dbfile, wal, Box::new(sink))?));
+    janus_transport::accept_loop(listener, kernel).await
+}
+
+/// Bind RESP and the replica channel; apply framed records on the replica Kernel.
+pub async fn listen_replica(
+    bind: &str,
+    replica_bind: &str,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let resp_listener = TcpListener::bind(bind).await?;
+    let replica_listener = TcpListener::bind(replica_bind).await?;
+    serve_replica(resp_listener, replica_listener, dbfile, wal).await
+}
+
+/// Serve RESP for clients and accept the dedicated replica wire on separate sockets.
+pub async fn serve_replica(
+    resp_listener: TcpListener,
+    replica_listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<()> {
+    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
+    let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
+    let replica = janus_replication::accept_loop(replica_listener, kernel);
+    tokio::try_join!(resp, replica)?;
+    Ok(())
 }
 
 /// Bind and accept forever (Tokio tasks per connection).

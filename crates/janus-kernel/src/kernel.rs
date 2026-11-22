@@ -302,6 +302,15 @@ impl Kernel {
         }
     }
 
+    /// Attach a replication sink after composition (for example primary + WAL).
+    ///
+    /// Does not change when the Kernel calls `replicate` — only which sink receives
+    /// records after successful Set / Delete / Expire.
+    pub fn with_replication(mut self, sink: Box<dyn ReplicationSink>) -> Self {
+        self.replication = Some(sink);
+        self
+    }
+
     /// Requires `password` for [`Command::Auth`]. Without this call the
     /// Kernel has no requirepass and the server stays open (default).
     pub fn with_requirepass(mut self, password: impl Into<Vec<u8>>) -> Self {

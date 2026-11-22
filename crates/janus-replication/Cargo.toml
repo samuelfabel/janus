@@ -1,0 +1,15 @@
+[package]
+name = "janus-replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TCP async replica wire: framing, primary sink, and replica accept loop"
+
+[dependencies]
+tokio = { workspace = true }
+janus-kernel = { workspace = true }
+janus-types = { workspace = true }
+
+[dev-dependencies]
+janus-storage = { workspace = true }

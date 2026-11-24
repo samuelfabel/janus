@@ -42,7 +42,7 @@ This project does **not**:
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
-**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the Kernel emits Set / Delete / Expire over a dedicated TCP wire (not RESP, Cap'n Proto, or WAL). With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire and applies records via `apply_replication_record`; `--bind` remains the RESP client listener. Bootstrap / full sync, failover, and slot redirects are not included yet. An in-process `ReplicationSink` harness remains available for unit tests.
+**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the primary connects to the replica wire, sends a **full-sync domain snapshot** (`export_snapshot` / `JANUSNAP` over the replica channel — not the operator’s local `SAVE` / `--dbfile` path), then streams Set / Delete / Expire records. With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire, imports the snapshot into empty storage, and applies catch-up records via `apply_replication_record`; `--bind` remains the RESP client listener. During the snapshot handoff the primary holds exclusive Kernel access (writes pause for that critical section). Partial sync / backlog offsets, failover, and slot redirects are not included yet. An in-process `ReplicationSink` harness remains available for unit tests.
 
 **Transactions:** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. WATCH, nested MULTI, and distributed transactions are not supported.
 
@@ -77,7 +77,7 @@ Janus is a Cargo workspace with one crate per layer. Dependencies point downward
 | `janus-serializer` | `Serializer` + RESP codec | `janus-types` |
 | `janus-protocol` | `Protocol` + RESP and HTTP protocol adapters | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop + connection instance | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus-replication` | Dedicated replica-wire framing, TCP sink, and replica accept loop | `janus-kernel`, Tokio |
+| `janus-replication` | Replica-wire framing (records + Snapshot), TCP sink, and replica accept/bootstrap loop | `janus-kernel`, Tokio |
 | `janus-http3` | Optional HTTP/3 server edge over Quinn | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one Janus capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session API using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
@@ -160,7 +160,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, the in-process primary→replica harness, and `tests/replica_wire_e2e.rs` for the TCP replica channel). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
+Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, the in-process primary→replica harness, and `tests/replica_wire_e2e.rs` for the TCP replica channel including full-sync bootstrap, TTL, and invalid-snapshot refusal). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
 
 ## Docker
 

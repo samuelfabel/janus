@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Replica full sync / bootstrap: primary sends a domain `JANUSNAP` Snapshot frame on connect (`Kernel::bootstrap_replica`), then streams records; replica imports only after a successful decode (invalid/truncated snapshots abort without partial state); distinct from local `SAVE` / `--dbfile`; e2e coverage in `tests/replica_wire_e2e.rs`
 - `janus-replication` crate with length-prefixed replica-wire framing, `TcpReplicationSink`, and a Tokio replica accept loop; composition root `--role primary|replica`, `--replica-bind`, `--replica-peer` (and `JANUS_*` env) keep the single-node default when unset; TCP e2e in `tests/replica_wire_e2e.rs`
 - Optional `janus-rest` HTTP/1.1 listener (`--features rest`) for key, TTL, persistence, transaction, metrics, tracing, and authentication routes on a dedicated TCP address
 - Optional `janus-grpc` edge with a bidirectional `Janus.Execute` session for the existing command surface; enable with `--features grpc` (Rust 1.88+) and select `grpc` or `resp+grpc` on dedicated TCP listeners sharing the same Kernel

@@ -600,6 +600,41 @@ pub fn apply_replication_record(kernel: &mut Kernel, record: &ReplicationRecord)
     }
 }
 
+/// Decode a domain snapshot and replace replica storage.
+///
+/// Decode runs before import so a truncated or invalid blob leaves existing
+/// storage untouched (no silent partial apply).
+pub fn apply_bootstrap_snapshot(
+    kernel: &mut Kernel,
+    bytes: &[u8],
+) -> Result<(), snapshot::SnapshotError> {
+    let entries = snapshot::decode(bytes)?;
+    kernel.storage.import_snapshot(&entries);
+    Ok(())
+}
+
+impl Kernel {
+    /// Export live storage as `JANUSNAP` bytes for replica full sync.
+    ///
+    /// Uses the same codec as local `SAVE`, but the bytes are a replication
+    /// payload — not a requirement to read the operator's on-disk SAVE file.
+    pub fn export_replication_snapshot(&mut self) -> Vec<u8> {
+        snapshot::encode(&self.storage.export_snapshot())
+    }
+
+    /// Full-sync handoff: export domain snapshot and send it on the sink.
+    ///
+    /// Consistency policy: the caller holds exclusive Kernel access for the
+    /// duration of export + `send_snapshot`, so client writes are paused for
+    /// the handoff. After this returns, incremental `replicate` calls catch
+    /// the replica up. Does not read or write the local SAVE file path.
+    pub fn bootstrap_replica(&mut self) -> Result<(), ()> {
+        let bytes = self.export_replication_snapshot();
+        let sink = self.replication.as_mut().ok_or(())?;
+        sink.send_snapshot(&bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +644,7 @@ mod tests {
         thread,
     };
 
+    use crate::replication::FakeReplicationSink;
     use janus_storage::{
         clock::FakeClock,
         engine::Ttl,
@@ -1320,6 +1356,35 @@ mod tests {
         assert_eq!(
             replica.execute(&Command::Get { key: KEY }),
             Response::Value(None)
+        );
+    }
+
+    #[test]
+    fn bootstrap_snapshot_round_trip_and_invalid_refused() {
+        let mut primary =
+            Kernel::with_replica(MemoryStorageEngine::new(), Box::new(FakeReplicationSink::new()));
+        assert_eq!(
+            primary.execute(&Command::Set {
+                key: KEY,
+                value: VALUE,
+            }),
+            Response::Empty
+        );
+        let bytes = primary.export_replication_snapshot();
+        primary.bootstrap_replica().expect("send_snapshot no-op ok");
+
+        let mut replica = Kernel::new(MemoryStorageEngine::new());
+        apply_bootstrap_snapshot(&mut replica, &bytes).expect("import");
+        assert_eq!(
+            replica.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
+        );
+
+        // Truncated blob must not clear existing replica state.
+        assert!(apply_bootstrap_snapshot(&mut replica, b"JANUS").is_err());
+        assert_eq!(
+            replica.execute(&Command::Get { key: KEY }),
+            Response::Value(Some(VALUE.to_vec()))
         );
     }
 

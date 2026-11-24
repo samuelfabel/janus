@@ -8,6 +8,8 @@ pub const KIND_SET: u8 = 1;
 pub const KIND_DELETE: u8 = 2;
 /// Wire kind for [`ReplicationRecord::Expire`].
 pub const KIND_EXPIRE: u8 = 3;
+/// Wire kind for a domain snapshot full-sync payload (`JANUSNAP` bytes).
+pub const KIND_SNAPSHOT: u8 = 4;
 
 /// Maximum accepted key or value length (16 MiB).
 pub const MAX_FIELD_LEN: usize = 16 * 1024 * 1024;
@@ -15,33 +17,66 @@ pub const MAX_FIELD_LEN: usize = 16 * 1024 * 1024;
 /// Maximum accepted frame payload length.
 pub const MAX_FRAME_LEN: usize = 32 * 1024 * 1024 + 16;
 
-/// Encode one record into a length-prefixed frame (`u32` BE length + payload).
-pub fn encode(record: &ReplicationRecord) -> Vec<u8> {
+/// One framed message on the replica wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+    /// Incremental mutation after (or instead of) a prior full sync.
+    Record(ReplicationRecord),
+    /// Domain snapshot bytes (`export_snapshot` / `JANUSNAP` codec).
+    Snapshot(Vec<u8>),
+}
+
+/// Encode one frame into a length-prefixed blob (`u32` BE length + payload).
+pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     let mut payload = Vec::new();
-    match record {
-        ReplicationRecord::Set { key, value } => {
-            payload.push(KIND_SET);
-            write_bytes(&mut payload, key);
-            write_bytes(&mut payload, value);
-        }
-        ReplicationRecord::Delete { key } => {
-            payload.push(KIND_DELETE);
-            write_bytes(&mut payload, key);
-        }
-        ReplicationRecord::Expire { key, seconds } => {
-            payload.push(KIND_EXPIRE);
-            write_bytes(&mut payload, key);
-            payload.extend_from_slice(&seconds.to_be_bytes());
+    match frame {
+        Frame::Record(record) => encode_record_payload(&mut payload, record),
+        Frame::Snapshot(bytes) => {
+            payload.push(KIND_SNAPSHOT);
+            write_bytes(&mut payload, bytes);
         }
     }
+    wrap_payload(payload)
+}
+
+/// Encode one record into a length-prefixed frame (`u32` BE length + payload).
+pub fn encode(record: &ReplicationRecord) -> Vec<u8> {
+    encode_frame(&Frame::Record(record.clone()))
+}
+
+/// Encode a domain snapshot into a length-prefixed frame.
+pub fn encode_snapshot(bytes: &[u8]) -> Vec<u8> {
+    encode_frame(&Frame::Snapshot(bytes.to_vec()))
+}
+
+fn wrap_payload(payload: Vec<u8>) -> Vec<u8> {
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(&payload);
     frame
 }
 
+fn encode_record_payload(payload: &mut Vec<u8>, record: &ReplicationRecord) {
+    match record {
+        ReplicationRecord::Set { key, value } => {
+            payload.push(KIND_SET);
+            write_bytes(payload, key);
+            write_bytes(payload, value);
+        }
+        ReplicationRecord::Delete { key } => {
+            payload.push(KIND_DELETE);
+            write_bytes(payload, key);
+        }
+        ReplicationRecord::Expire { key, seconds } => {
+            payload.push(KIND_EXPIRE);
+            write_bytes(payload, key);
+            payload.extend_from_slice(&seconds.to_be_bytes());
+        }
+    }
+}
+
 /// Decode one complete frame payload (without the leading length prefix).
-pub fn decode_payload(payload: &[u8]) -> Result<ReplicationRecord, DecodeError> {
+pub fn decode_payload(payload: &[u8]) -> Result<Frame, DecodeError> {
     if payload.is_empty() {
         return Err(DecodeError::Empty);
     }
@@ -54,14 +89,14 @@ pub fn decode_payload(payload: &[u8]) -> Result<ReplicationRecord, DecodeError> 
             if offset != payload.len() {
                 return Err(DecodeError::TrailingBytes);
             }
-            Ok(ReplicationRecord::Set { key, value })
+            Ok(Frame::Record(ReplicationRecord::Set { key, value }))
         }
         KIND_DELETE => {
             let key = read_bytes(payload, &mut offset)?;
             if offset != payload.len() {
                 return Err(DecodeError::TrailingBytes);
             }
-            Ok(ReplicationRecord::Delete { key })
+            Ok(Frame::Record(ReplicationRecord::Delete { key }))
         }
         KIND_EXPIRE => {
             let key = read_bytes(payload, &mut offset)?;
@@ -74,10 +109,17 @@ pub fn decode_payload(payload: &[u8]) -> Result<ReplicationRecord, DecodeError> 
             if offset != payload.len() {
                 return Err(DecodeError::TrailingBytes);
             }
-            Ok(ReplicationRecord::Expire {
+            Ok(Frame::Record(ReplicationRecord::Expire {
                 key,
                 seconds: u64::from_be_bytes(secs),
-            })
+            }))
+        }
+        KIND_SNAPSHOT => {
+            let bytes = read_bytes(payload, &mut offset)?;
+            if offset != payload.len() {
+                return Err(DecodeError::TrailingBytes);
+            }
+            Ok(Frame::Snapshot(bytes))
         }
         _ => Err(DecodeError::UnknownKind(kind)),
     }
@@ -94,7 +136,7 @@ pub enum DecodeError {
     Truncated,
     /// Bytes remained after a complete record.
     TrailingBytes,
-    /// Kind byte was not Set / Delete / Expire.
+    /// Kind byte was not Set / Delete / Expire / Snapshot.
     UnknownKind(u8),
 }
 
@@ -146,8 +188,20 @@ mod tests {
             let len = u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize;
             assert_eq!(len, frame.len() - 4);
             let decoded = decode_payload(&frame[4..]).expect("decode");
-            assert_eq!(&decoded, record);
+            assert_eq!(decoded, Frame::Record(record.clone()));
         }
+    }
+
+    #[test]
+    fn snapshot_round_trip() {
+        let snap = b"JANUSNAP\x01\x00\x00\x00".to_vec();
+        let frame = encode_snapshot(&snap);
+        let len = u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize;
+        assert_eq!(len, frame.len() - 4);
+        assert_eq!(
+            decode_payload(&frame[4..]).expect("decode"),
+            Frame::Snapshot(snap)
+        );
     }
 
     #[test]
@@ -163,6 +217,10 @@ mod tests {
     fn truncated_payload_is_rejected() {
         assert_eq!(decode_payload(&[KIND_DELETE]), Err(DecodeError::Truncated));
         assert_eq!(decode_payload(&[]), Err(DecodeError::Empty));
+        assert_eq!(
+            decode_payload(&[KIND_SNAPSHOT]),
+            Err(DecodeError::Truncated)
+        );
     }
 
     #[test]

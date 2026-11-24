@@ -4,7 +4,7 @@
 use std::{
     io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
 };
 
 use janus_http3::quic::Endpoint;
@@ -16,7 +16,7 @@ use janus_storage::{
     wal::boot_wal,
     MemoryStorageEngine, StorageEngine,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::watch};
 #[cfg(feature = "capnp")]
 use tokio::task::LocalSet;
 
@@ -109,17 +109,88 @@ pub async fn listen_replica(
 }
 
 /// Serve RESP for clients and accept the dedicated replica wire on separate sockets.
+///
+/// Client writes are denied until [`promote_ha_replica`] (or an equivalent
+/// supervisor call) sets `accepts_writes`. Replica-wire apply still works.
 pub async fn serve_replica(
     resp_listener: TcpListener,
     replica_listener: TcpListener,
     dbfile: Option<PathBuf>,
     wal: Option<PathBuf>,
 ) -> io::Result<()> {
-    let kernel = Arc::new(Mutex::new(build_kernel(dbfile, wal)?));
-    let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
-    let replica = janus_replication::accept_loop(replica_listener, kernel);
-    tokio::try_join!(resp, replica)?;
-    Ok(())
+    let (_handles, fut) = serve_replica_ha(resp_listener, replica_listener, dbfile, wal)?;
+    fut.await
+}
+
+/// Handles for an HA-capable replica: stop stream apply and flip write role.
+pub struct HaReplicaHandles {
+    /// Shared Kernel (RESP + replica wire).
+    pub kernel: Arc<Mutex<Kernel>>,
+    /// When false, replica sessions stop applying remote frames.
+    pub apply_stream: Arc<AtomicBool>,
+    /// Signal the replica accept loop to exit (after promotion).
+    pub stop_apply: watch::Sender<bool>,
+}
+
+/// Build a replica that can be promoted by the failover supervisor.
+///
+/// Returns handles plus a future that runs RESP + cancellable replica wire.
+/// After promotion stops the wire loop, RESP keeps serving as the new primary.
+pub fn serve_replica_ha(
+    resp_listener: TcpListener,
+    replica_listener: TcpListener,
+    dbfile: Option<PathBuf>,
+    wal: Option<PathBuf>,
+) -> io::Result<(
+    HaReplicaHandles,
+    impl std::future::Future<Output = io::Result<()>>,
+)> {
+    let mut kernel = build_kernel(dbfile, wal)?;
+    kernel.set_accepts_writes(false);
+    let kernel = Arc::new(Mutex::new(kernel));
+    let apply_stream = Arc::new(AtomicBool::new(true));
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let handles = HaReplicaHandles {
+        kernel: Arc::clone(&kernel),
+        apply_stream: Arc::clone(&apply_stream),
+        stop_apply: stop_tx,
+    };
+    let fut = async move {
+        let resp = janus_transport::accept_loop(resp_listener, Arc::clone(&kernel));
+        let replica = janus_replication::accept_loop_until(
+            replica_listener,
+            kernel,
+            apply_stream,
+            stop_rx,
+        );
+        tokio::pin!(resp);
+        tokio::pin!(replica);
+        tokio::select! {
+            result = &mut replica => {
+                result?;
+                // Wire apply stopped (promotion): keep RESP as the writable primary.
+                resp.await
+            }
+            result = &mut resp => result,
+        }
+    };
+    Ok((handles, fut))
+}
+
+/// Promote a replica built with [`serve_replica_ha`]: stop stream apply, accept
+/// writes, publish endpoint on `authority`.
+pub fn promote_ha_replica(
+    handles: &HaReplicaHandles,
+    authority: &janus_replication::ConfigAuthority,
+    new_primary_endpoint: impl Into<String>,
+) -> io::Result<()> {
+    janus_replication::promote_replica(
+        &handles.kernel,
+        &handles.apply_stream,
+        &handles.stop_apply,
+        authority,
+        new_primary_endpoint,
+    )
 }
 
 /// Bind and accept forever (Tokio tasks per connection).

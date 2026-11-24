@@ -185,7 +185,7 @@ flowchart TD
 | `janus-serializer` | `Serializer` trait and RESP codec | `janus-types` |
 | `janus-protocol` | `Protocol` trait, RESP instance, and HTTP key/value adapter | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus-replication` | Length-prefixed replica-wire framing (records + Snapshot), primary `TcpReplicationSink`, replica accept/bootstrap/apply loop | `janus-kernel`, Tokio |
+| `janus-replication` | Length-prefixed replica-wire framing (records + Snapshot), primary `TcpReplicationSink`, replica accept/bootstrap/apply loop, config authority + health probe + promote supervisor | `janus-kernel`, Tokio |
 | `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one root capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session edge using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
@@ -242,7 +242,12 @@ close the replica session; a failed send on the primary surfaces as
 
 **Bootstrap vs local SAVE:** full sync reuses the `JANUSNAP` codec as a wire payload.
 It does not require a shared filesystem or reading the operator’s `--dbfile` SAVE path.
-Partial sync / backlog offsets, failover, and slot ownership remain out of scope.
+
+**Single-shard HA:** a control-plane supervisor (in-process or ops harness) probes the
+primary endpoint, promotes a replica by stopping stream apply and enabling client
+writes, and publishes the new RESP endpoint via `ConfigAuthority`. The Kernel does
+not run Raft, gossip, or Sentinel. See [ops-ha.md](ops-ha.md). Partial sync /
+backlog offsets and multi-shard slot ownership remain out of scope.
 
 # Future Architecture
 
@@ -250,8 +255,7 @@ Future versions may introduce additional layers.
 
 Examples:
 
-- Cluster management and failover
-- Slot map / resharding redirects
+- Multi-shard slot map / resharding redirects
 - Plugin system
 - Security
 

@@ -209,7 +209,16 @@ A copy of data maintained on another node over the dedicated replica wire.
 An empty replica receives a full-sync domain snapshot first, then catch-up
 mutation records. That snapshot payload reuses the same codec as local `SAVE`,
 but full sync is not the operator’s on-disk SAVE file and does not require a
-shared filesystem. Partial sync / backlog offsets are a later concern.
+shared filesystem. Client writes on a replica are rejected until promotion.
+Partial sync / backlog offsets are a later concern.
+
+---
+
+# Config authority
+
+Control-plane component (outside the Kernel) that publishes the current primary
+RESP endpoint so clients and operators can re-point after failover. Not a
+consensus cluster and not Redis Sentinel.
 
 ---
 

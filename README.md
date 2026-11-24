@@ -21,7 +21,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional Cap'n Proto RPC edge (`janus-capnp-rpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features capnp`, then select Cap'n Proto alone or alongside RESP while both listeners share one Kernel
 - Optional gRPC edge (`janus-grpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features grpc`, then select gRPC alone or alongside RESP while both listeners share one Kernel
 - Optional REST API (`janus-rest`) maps the command surface to HTTP routes on a dedicated TCP listener; enable it with Cargo `--features rest`, then select REST alone or alongside RESP
-- Optional TCP **primary → replica** wire (`janus-replication`) with `--role primary|replica`, plus the in-process `ReplicationSink` harness (no Raft / cluster / failover)
+- Optional TCP **primary → replica** wire (`janus-replication`) with `--role primary|replica`, plus in-process single-shard HA helpers (health probe, promote, config authority) — no Raft / Sentinel / cluster gossip
 - **Transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID guarantees)
 - **Metrics**: Kernel counters exposed through `INFO`
 - **Tracing**: Kernel span ring buffer exposed through `TRACES`
@@ -42,7 +42,7 @@ This project does **not**:
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
-**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the primary connects to the replica wire, sends a **full-sync domain snapshot** (`export_snapshot` / `JANUSNAP` over the replica channel — not the operator’s local `SAVE` / `--dbfile` path), then streams Set / Delete / Expire records. With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire, imports the snapshot into empty storage, and applies catch-up records via `apply_replication_record`; `--bind` remains the RESP client listener. During the snapshot handoff the primary holds exclusive Kernel access (writes pause for that critical section). Partial sync / backlog offsets, failover, and slot redirects are not included yet. An in-process `ReplicationSink` harness remains available for unit tests.
+**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the primary connects to the replica wire, sends a **full-sync domain snapshot** (`export_snapshot` / `JANUSNAP` over the replica channel — not the operator’s local `SAVE` / `--dbfile` path), then streams Set / Delete / Expire records. With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire, imports the snapshot into empty storage, and applies catch-up records via `apply_replication_record`; `--bind` remains the RESP client listener and **rejects client writes** until promotion. During the snapshot handoff the primary holds exclusive Kernel access (writes pause for that critical section). Single-shard HA uses an external config authority plus a supervisor that detects a dead primary (TCP health timeout), promotes a replica (`REPLICAOF NO ONE` conceptually), and publishes the new endpoint — see [docs/ops-ha.md](docs/ops-ha.md). Async replication implies a loss window on failover. Partial sync / backlog offsets and multi-shard slot redirects are not included yet.
 
 **Transactions:** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. WATCH, nested MULTI, and distributed transactions are not supported.
 
@@ -77,7 +77,7 @@ Janus is a Cargo workspace with one crate per layer. Dependencies point downward
 | `janus-serializer` | `Serializer` + RESP codec | `janus-types` |
 | `janus-protocol` | `Protocol` + RESP and HTTP protocol adapters | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop + connection instance | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus-replication` | Replica-wire framing (records + Snapshot), TCP sink, and replica accept/bootstrap loop | `janus-kernel`, Tokio |
+| `janus-replication` | Replica-wire framing (records + Snapshot), TCP sink, accept/bootstrap loop, HA authority / health / promote | `janus-kernel`, Tokio |
 | `janus-http3` | Optional HTTP/3 server edge over Quinn | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one Janus capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session API using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
@@ -160,7 +160,7 @@ printf '*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n' | nc 127.0.0.1 6380
 Without `--dbfile` / `JANUS_DBFILE`, `SAVE` returns an error (`ERR save disabled`).
 `--dbfile` and `--wal` cannot both be set (`ERR conflicting persistence`).
 
-Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, the in-process primary→replica harness, and `tests/replica_wire_e2e.rs` for the TCP replica channel including full-sync bootstrap, TTL, and invalid-snapshot refusal). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
+Automated coverage lives in `cargo test --workspace` (Tokio TCP e2e harness in `tests/e2e.rs` on an ephemeral port, including EXPIRE/TTL, SAVE/restore, WAL recovery, multi-client shared-store concurrency, MULTI/EXEC/DISCARD transactions, the AUTH / requirepass gate, read-only roles with `NOPERM`, the in-process primary→replica harness, `tests/replica_wire_e2e.rs` for the TCP replica channel including full-sync bootstrap, TTL, and invalid-snapshot refusal, and `tests/failover_e2e.rs` for kill → detect → promote → write on the new primary). HTTP/3 coverage uses a local test certificate and verifies multiple requests on one QUIC connection, the request body limit, and shared state across HTTP/3 and RESP.
 
 ## Docker
 

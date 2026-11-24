@@ -8,11 +8,21 @@
 //! Full sync: the primary sends a [`framing::Frame::Snapshot`] (JANUSNAP bytes
 //! from `export_snapshot`), then streams incremental records. Partial sync /
 //! backlog offsets are out of scope.
+//!
+//! Single-shard HA helpers (`authority`, `health`, `supervisor`) detect a dead
+//! primary, promote a replica, and publish the new endpoint — no Raft, gossip,
+//! or Sentinel protocol.
 
 pub mod accept;
+pub mod authority;
 pub mod framing;
+pub mod health;
 pub mod sink;
+pub mod supervisor;
 
-pub use accept::accept_loop;
+pub use accept::{accept_loop, accept_loop_until};
+pub use authority::ConfigAuthority;
 pub use framing::{decode_payload, encode, encode_frame, encode_snapshot, DecodeError, Frame};
+pub use health::{probe_tcp, wait_until_dead, ProbeResult};
 pub use sink::{FailingTcpReplicationSink, TcpReplicationSink};
+pub use supervisor::{detect_and_promote, promote_replica, FailoverConfig};

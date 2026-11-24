@@ -19,6 +19,7 @@ const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
 const ERR_WAL_APPEND_FAILED: &str = "ERR wal append failed";
 const ERR_REPLICATION_FAILED: &str = "ERR replication failed";
+const ERR_READONLY_REPLICA: &str = "READONLY You can't write against a read-only replica";
 const ERR_MULTI_NESTED: &str = "ERR MULTI calls can not be nested";
 const ERR_EXEC_WITHOUT_MULTI: &str = "ERR EXEC without MULTI";
 const ERR_DISCARD_WITHOUT_MULTI: &str = "ERR DISCARD without MULTI";
@@ -168,6 +169,11 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// and [`is_write`] classifies commands so the Protocol Instance can deny
 /// writes on read-only connections. With only a read-only password set, every
 /// authenticated connection is read-only.
+///
+/// Composition may clear [`Kernel::accepts_writes`] on a replica so client
+/// writes fail with [`READONLY`](ERR_READONLY_REPLICA) until promotion.
+/// Replica-wire apply uses [`apply_replication_record`], which bypasses that
+/// gate.
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     requirepass: Option<Vec<u8>>,
@@ -175,6 +181,8 @@ pub struct Kernel {
     store: Option<Box<dyn SnapshotStore>>,
     wal: Option<WalWriter>,
     replication: Option<Box<dyn ReplicationSink>>,
+    /// When `false`, client write commands are rejected (replica / demoted node).
+    accepts_writes: bool,
     in_multi: bool,
     multi_queue: Vec<QueuedCommand>,
     total_commands: u64,
@@ -208,6 +216,7 @@ impl Kernel {
             store: None,
             wal: None,
             replication: None,
+            accepts_writes: true,
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -238,6 +247,7 @@ impl Kernel {
             store: Some(store),
             wal: None,
             replication: None,
+            accepts_writes: true,
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -262,6 +272,7 @@ impl Kernel {
             store: None,
             wal: Some(wal),
             replication: None,
+            accepts_writes: true,
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -292,6 +303,7 @@ impl Kernel {
             store: None,
             wal: None,
             replication: Some(sink),
+            accepts_writes: true,
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -309,6 +321,29 @@ impl Kernel {
     pub fn with_replication(mut self, sink: Box<dyn ReplicationSink>) -> Self {
         self.replication = Some(sink);
         self
+    }
+
+    /// Whether client write commands are accepted (`true` for primary / single-node).
+    pub fn accepts_writes(&self) -> bool {
+        self.accepts_writes
+    }
+
+    /// Enable or deny client writes (composition-owned node role flag).
+    ///
+    /// Replica-wire apply via [`apply_replication_record`] ignores this flag.
+    pub fn set_accepts_writes(&mut self, accepts: bool) {
+        self.accepts_writes = accepts;
+    }
+
+    /// Builder: start as a read-only replica for client writes.
+    pub fn with_accepts_writes(mut self, accepts: bool) -> Self {
+        self.accepts_writes = accepts;
+        self
+    }
+
+    /// Drop the replication sink (demoted / standalone node no longer pushes).
+    pub fn clear_replication(&mut self) {
+        self.replication = None;
     }
 
     /// Requires `password` for [`Command::Auth`]. Without this call the
@@ -350,6 +385,11 @@ impl Kernel {
 
     /// Runs `command` and returns a domain response (no RESP bytes).
     pub fn execute(&mut self, command: &Command<'_>) -> Response {
+        if !self.accepts_writes && is_write(command) {
+            self.total_commands = self.total_commands.saturating_add(1);
+            self.record_span(command_span_name(command));
+            return Response::Error(ERR_READONLY_REPLICA.to_string());
+        }
         match command {
             Command::Multi => {
                 self.total_commands = self.total_commands.saturating_add(1);
@@ -581,22 +621,25 @@ impl Kernel {
 
 /// Apply a replication record on a replica kernel (no sink required).
 ///
-/// Maps each [`ReplicationRecord`] to the matching domain [`Command`] and runs
-/// [`Kernel::execute`]. Expire deadlines are relative to the replica's
+/// Maps each [`ReplicationRecord`] to the matching domain mutation and applies
+/// it even when [`Kernel::accepts_writes`] is `false` (client writes stay
+/// denied until promotion). Expire deadlines are relative to the replica's
 /// `storage.now()` at apply time.
 pub fn apply_replication_record(kernel: &mut Kernel, record: &ReplicationRecord) -> Response {
     match record {
-        ReplicationRecord::Set { key, value } => kernel.execute(&Command::Set {
+        ReplicationRecord::Set { key, value } => kernel.execute_immediate(&Command::Set {
             key: key.as_slice(),
             value: value.as_slice(),
         }),
         ReplicationRecord::Delete { key } => {
-            kernel.execute(&Command::Delete { key: key.as_slice() })
+            kernel.execute_immediate(&Command::Delete { key: key.as_slice() })
         }
-        ReplicationRecord::Expire { key, seconds } => kernel.execute(&Command::Expire {
-            key: key.as_slice(),
-            seconds: *seconds,
-        }),
+        ReplicationRecord::Expire { key, seconds } => {
+            kernel.execute_immediate(&Command::Expire {
+                key: key.as_slice(),
+                seconds: *seconds,
+            })
+        }
     }
 }
 
@@ -1752,6 +1795,46 @@ mod tests {
         assert_eq!(
             kernel.execute(&Command::Auth { password: b"wrong" }),
             Response::Error(ERR_AUTH_INVALID_PASSWORD.to_string())
+        );
+    }
+
+    #[test]
+    fn replica_write_gate_rejects_client_writes_until_promoted() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new()).with_accepts_writes(false);
+        assert!(!kernel.accepts_writes());
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"k",
+                value: b"v",
+            }),
+            Response::Error(ERR_READONLY_REPLICA.to_string())
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"k" }),
+            Response::Value(None)
+        );
+        // Wire apply still mutates storage.
+        assert_eq!(
+            apply_replication_record(
+                &mut kernel,
+                &ReplicationRecord::Set {
+                    key: b"k".to_vec(),
+                    value: b"from-wire".to_vec(),
+                }
+            ),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"k" }),
+            Response::Value(Some(b"from-wire".to_vec()))
+        );
+        kernel.set_accepts_writes(true);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"k",
+                value: b"promoted",
+            }),
+            Response::Empty
         );
     }
 

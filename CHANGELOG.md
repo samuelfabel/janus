@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Single-shard HA control plane: TCP health probe, in-process promote (`accepts_writes` + stop stream apply), `ConfigAuthority` (memory/file) publishing the current primary endpoint; ops guide in `docs/ops-ha.md`; e2e in `tests/failover_e2e.rs` (no Raft / Sentinel / gossip)
+- Kernel composition flag `accepts_writes` (replicas reject client writes with `READONLY …`; replica-wire apply bypasses the gate); `serve_replica_ha` / `promote_ha_replica` in the composition root
 - Replica full sync / bootstrap: primary sends a domain `JANUSNAP` Snapshot frame on connect (`Kernel::bootstrap_replica`), then streams records; replica imports only after a successful decode (invalid/truncated snapshots abort without partial state); distinct from local `SAVE` / `--dbfile`; e2e coverage in `tests/replica_wire_e2e.rs`
 - `janus-replication` crate with length-prefixed replica-wire framing, `TcpReplicationSink`, and a Tokio replica accept loop; composition root `--role primary|replica`, `--replica-bind`, `--replica-peer` (and `JANUS_*` env) keep the single-node default when unset; TCP e2e in `tests/replica_wire_e2e.rs`
 - Optional `janus-rest` HTTP/1.1 listener (`--features rest`) for key, TTL, persistence, transaction, metrics, tracing, and authentication routes on a dedicated TCP address

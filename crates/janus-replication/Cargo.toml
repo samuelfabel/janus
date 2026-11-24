@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "TCP async replica wire: framing, primary sink, and replica accept loop"
+description = "TCP async replica wire, bootstrap, and single-shard HA control-plane helpers"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 janus-kernel = { workspace = true }
 janus-types = { workspace = true }
 

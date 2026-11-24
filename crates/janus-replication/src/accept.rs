@@ -2,16 +2,18 @@
 
 use std::{
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
-use janus_kernel::{
-    apply_bootstrap_snapshot, apply_replication_record, Kernel,
-};
+use janus_kernel::{apply_bootstrap_snapshot, apply_replication_record, Kernel};
 use janus_types::Response;
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
+    sync::watch,
 };
 
 use crate::framing::{self, DecodeError, Frame, MAX_FRAME_LEN};
@@ -27,18 +29,55 @@ use crate::framing::{self, DecodeError, Frame, MAX_FRAME_LEN};
 /// One connection is handled per accepted socket; the primary opens a single
 /// peer connection in this milestone.
 pub async fn accept_loop(listener: TcpListener, kernel: Arc<Mutex<Kernel>>) -> io::Result<()> {
+    let (_tx, rx) = watch::channel(false);
+    let apply = Arc::new(AtomicBool::new(true));
+    accept_loop_until(listener, kernel, apply, rx).await
+}
+
+/// Like [`accept_loop`], but stops accepting when `stop` becomes `true`.
+///
+/// While `apply_stream` is `false`, in-flight sessions stop applying frames
+/// (promotion: stop following the old primary). Dropping the listener is not
+/// required; the supervisor flips the flag and signals `stop`.
+pub async fn accept_loop_until(
+    listener: TcpListener,
+    kernel: Arc<Mutex<Kernel>>,
+    apply_stream: Arc<AtomicBool>,
+    mut stop: watch::Receiver<bool>,
+) -> io::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
-        let kernel = Arc::clone(&kernel);
-        tokio::spawn(async move {
-            let _ = session(stream, kernel).await;
-        });
+        tokio::select! {
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    apply_stream.store(false, Ordering::SeqCst);
+                    return Ok(());
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                if !apply_stream.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let kernel = Arc::clone(&kernel);
+                let apply_stream = Arc::clone(&apply_stream);
+                tokio::spawn(async move {
+                    let _ = session(stream, kernel, apply_stream).await;
+                });
+            }
+        }
     }
 }
 
-async fn session(mut stream: TcpStream, kernel: Arc<Mutex<Kernel>>) -> io::Result<()> {
+async fn session(
+    mut stream: TcpStream,
+    kernel: Arc<Mutex<Kernel>>,
+    apply_stream: Arc<AtomicBool>,
+) -> io::Result<()> {
     let _ = stream.set_nodelay(true);
     loop {
+        if !apply_stream.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let frame = match read_frame(&mut stream).await {
             Ok(frame) => frame,
             Err(ReadError::Io(err)) if err.kind() == io::ErrorKind::UnexpectedEof => {
@@ -50,6 +89,9 @@ async fn session(mut stream: TcpStream, kernel: Arc<Mutex<Kernel>>) -> io::Resul
                 return Ok(());
             }
         };
+        if !apply_stream.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         match frame {
             Frame::Snapshot(bytes) => {
                 let mut guard = kernel.lock().expect("replica kernel mutex");

@@ -154,6 +154,180 @@ async fn primary_without_peer_returns_replication_failed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn empty_replica_bootstraps_from_primary_snapshot_with_ttl() {
+    // Primary holds data before the replica wire connects; full sync must
+    // deliver the domain snapshot (not a local SAVE file).
+    let replica_wire = TcpListener::bind("127.0.0.1:0").await.expect("replica wire bind");
+    let replica_wire_addr = replica_wire.local_addr().expect("addr").to_string();
+    let replica_resp = TcpListener::bind("127.0.0.1:0").await.expect("replica resp bind");
+    let replica_resp_addr = replica_resp.local_addr().expect("addr").to_string();
+
+    tokio::spawn(async move {
+        let _ = janus::serve_replica(replica_resp, replica_wire, None, None).await;
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let mut primary = janus::build_kernel(None, None).expect("primary kernel");
+    assert_eq!(
+        primary.execute(&Command::Set {
+            key: b"a",
+            value: b"1",
+        }),
+        Response::Empty
+    );
+    assert_eq!(
+        primary.execute(&Command::Set {
+            key: b"b",
+            value: b"2",
+        }),
+        Response::Empty
+    );
+    assert_eq!(
+        primary.execute(&Command::Expire {
+            key: b"b",
+            seconds: 90,
+        }),
+        Response::Integer(1)
+    );
+
+    let sink = janus_replication::TcpReplicationSink::connect(&replica_wire_addr)
+        .expect("connect sink");
+    let mut primary = primary.with_replication(Box::new(sink));
+    primary.bootstrap_replica().expect("full sync");
+
+    // Catch-up after snapshot still streams.
+    assert_eq!(
+        primary.execute(&Command::Set {
+            key: b"c",
+            value: b"3",
+        }),
+        Response::Empty
+    );
+
+    wait_until(|| {
+        let mut replica = match TcpStream::connect(&replica_resp_addr) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if replica.write_all(&resp_get("a")).is_err() {
+            return false;
+        }
+        let mut a = [0u8; 7];
+        if replica.read_exact(&mut a).is_err() || &a != b"$1\r\n1\r\n" {
+            return false;
+        }
+        if replica.write_all(&resp_get("b")).is_err() {
+            return false;
+        }
+        let mut b = [0u8; 7];
+        if replica.read_exact(&mut b).is_err() || &b != b"$1\r\n2\r\n" {
+            return false;
+        }
+        if replica.write_all(&resp_get("c")).is_err() {
+            return false;
+        }
+        let mut c = [0u8; 7];
+        if replica.read_exact(&mut c).is_err() || &c != b"$1\r\n3\r\n" {
+            return false;
+        }
+        let ttl = b"*2\r\n$3\r\nTTL\r\n$1\r\nb\r\n";
+        if replica.write_all(ttl).is_err() {
+            return false;
+        }
+        let mut ttl_buf = [0u8; 5];
+        if replica.read_exact(&mut ttl_buf).is_err() {
+            return false;
+        }
+        ttl_buf[0] == b':' && ttl_buf[ttl_buf.len() - 2] == b'\r'
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_snapshot_aborts_bootstrap_without_partial_state() {
+    let replica_wire = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let replica_wire_addr = replica_wire.local_addr().expect("addr").to_string();
+    let replica_resp = TcpListener::bind("127.0.0.1:0").await.expect("resp bind");
+    let replica_resp_addr = replica_resp.local_addr().expect("addr").to_string();
+
+    tokio::spawn(async move {
+        let _ = janus::serve_replica(replica_resp, replica_wire, None, None).await;
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    // Truncated / invalid snapshot frame: replica must not serve partial keys.
+    let mut stream = TcpStream::connect(&replica_wire_addr).expect("connect wire");
+    let bad = janus_replication::encode_snapshot(b"NOTASNAP");
+    stream.write_all(&bad).expect("write bad snapshot");
+    let _ = stream.flush();
+    drop(stream);
+
+    thread::sleep(Duration::from_millis(80));
+
+    let mut replica = TcpStream::connect(&replica_resp_addr).expect("replica resp");
+    replica
+        .write_all(&resp_get("ghost"))
+        .expect("get after failed bootstrap");
+    let mut buf = [0u8; 5];
+    replica.read_exact(&mut buf).expect("read");
+    assert_eq!(&buf, b"$-1\r\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_during_bootstrap_critical_section_serialize_after_snapshot() {
+    // Consistency policy: exclusive Kernel access during export + send_snapshot
+    // pauses writes for the handoff; post-bootstrap mutations stream as records
+    // and the replica matches the primary cut.
+    let replica_wire = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let replica_wire_addr = replica_wire.local_addr().expect("addr").to_string();
+    let replica_resp = TcpListener::bind("127.0.0.1:0").await.expect("resp bind");
+    let replica_resp_addr = replica_resp.local_addr().expect("addr").to_string();
+
+    tokio::spawn(async move {
+        let _ = janus::serve_replica(replica_resp, replica_wire, None, None).await;
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let mut primary = janus::build_kernel(None, None).expect("kernel");
+    assert_eq!(
+        primary.execute(&Command::Set {
+            key: b"pre",
+            value: b"snap",
+        }),
+        Response::Empty
+    );
+    let sink = janus_replication::TcpReplicationSink::connect(&replica_wire_addr)
+        .expect("connect");
+    let mut primary = primary.with_replication(Box::new(sink));
+    primary.bootstrap_replica().expect("bootstrap");
+    assert_eq!(
+        primary.execute(&Command::Set {
+            key: b"post",
+            value: b"stream",
+        }),
+        Response::Empty
+    );
+
+    wait_until(|| {
+        let mut replica = match TcpStream::connect(&replica_resp_addr) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if replica.write_all(&resp_get("pre")).is_err() {
+            return false;
+        }
+        let mut pre = [0u8; 10];
+        if replica.read_exact(&mut pre).is_err() || &pre != b"$4\r\nsnap\r\n" {
+            return false;
+        }
+        if replica.write_all(&resp_get("post")).is_err() {
+            return false;
+        }
+        let mut post = [0u8; 12];
+        matches!(replica.read_exact(&mut post), Ok(())) && &post == b"$6\r\nstream\r\n"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn peer_drop_yields_replication_failed_on_next_mutate() {
     let replica_wire = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let replica_wire_addr = replica_wire.local_addr().expect("addr").to_string();

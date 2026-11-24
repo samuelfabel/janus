@@ -74,6 +74,10 @@ pub async fn listen_primary(
 }
 
 /// Serve RESP as a primary with a TCP replica sink already connecting to `replica_peer`.
+///
+/// On connect, the primary performs a full-sync handoff (`bootstrap_replica`):
+/// domain snapshot over the replica wire, then incremental records. Local SAVE
+/// / `--dbfile` is not required for that path.
 pub async fn serve_primary(
     listener: TcpListener,
     replica_peer: &str,
@@ -84,7 +88,11 @@ pub async fn serve_primary(
     let sink = tokio::task::spawn_blocking(move || TcpReplicationSink::connect(peer))
         .await
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))??;
-    let kernel = Arc::new(Mutex::new(build_primary_kernel(dbfile, wal, Box::new(sink))?));
+    let mut primary = build_primary_kernel(dbfile, wal, Box::new(sink))?;
+    primary
+        .bootstrap_replica()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "ERR replication bootstrap failed"))?;
+    let kernel = Arc::new(Mutex::new(primary));
     janus_transport::accept_loop(listener, kernel).await
 }
 

@@ -6,6 +6,14 @@ use super::record::ReplicationRecord;
 pub trait ReplicationSink: Send {
     /// Deliver one mutation record. `Err(())` signals replication failure to the caller.
     fn replicate(&mut self, record: &ReplicationRecord) -> Result<(), ()>;
+
+    /// Deliver a domain snapshot for replica full sync (`JANUSNAP` bytes).
+    ///
+    /// Default is a no-op success so in-process harness sinks stay unchanged.
+    /// TCP sinks override this to frame a Snapshot message on the wire.
+    fn send_snapshot(&mut self, _bytes: &[u8]) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 /// Test sink that appends every successful `replicate` call in order.

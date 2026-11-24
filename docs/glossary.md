@@ -204,9 +204,12 @@ Future modules may subscribe to these events.
 
 # Replica
 
-A copy of data maintained on another node.
+A copy of data maintained on another node over the dedicated replica wire.
 
-Replication is intended for future distributed versions.
+An empty replica receives a full-sync domain snapshot first, then catch-up
+mutation records. That snapshot payload reuses the same codec as local `SAVE`,
+but full sync is not the operator’s on-disk SAVE file and does not require a
+shared filesystem. Partial sync / backlog offsets are a later concern.
 
 ---
 

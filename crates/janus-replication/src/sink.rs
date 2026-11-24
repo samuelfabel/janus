@@ -17,15 +17,22 @@ enum Job {
         record: ReplicationRecord,
         ack: SyncSender<Result<(), ()>>,
     },
+    Snapshot {
+        bytes: Vec<u8>,
+        ack: SyncSender<Result<(), ()>>,
+    },
     Shutdown,
 }
 
 /// Primary-side sink: encodes each record and writes it to a peer over TCP.
 ///
-/// I/O runs on a dedicated OS thread so `replicate` can block safely when the
-/// Kernel is invoked from a Tokio worker. A failed write or a dropped peer
-/// returns `Err(())`, matching Kernel `ERR replication failed` semantics
-/// (local mutation is not rolled back).
+/// I/O runs on a dedicated OS thread so `replicate` / `send_snapshot` can block
+/// safely when the Kernel is invoked from a Tokio worker. A failed write or a
+/// dropped peer returns `Err(())`, matching Kernel `ERR replication failed`
+/// semantics (local mutation is not rolled back).
+///
+/// Full sync: composition calls [`ReplicationSink::send_snapshot`] while holding
+/// the Kernel lock (writes pause for the handoff), then streams records.
 pub struct TcpReplicationSink {
     tx: SyncSender<Job>,
 }
@@ -56,6 +63,18 @@ impl TcpReplicationSink {
                                 break;
                             }
                         }
+                        Job::Snapshot { bytes, ack } => {
+                            let frame = framing::encode_snapshot(&bytes);
+                            let result = stream
+                                .write_all(&frame)
+                                .and_then(|_| stream.flush())
+                                .map_err(|_| ());
+                            let failed = result.is_err();
+                            let _ = ack.send(result);
+                            if failed {
+                                break;
+                            }
+                        }
                     }
                 }
             })?;
@@ -69,6 +88,17 @@ impl ReplicationSink for TcpReplicationSink {
         self.tx
             .send(Job::Record {
                 record: record.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|_| ())?;
+        ack_rx.recv().map_err(|_| ())?
+    }
+
+    fn send_snapshot(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(Job::Snapshot {
+                bytes: bytes.to_vec(),
                 ack: ack_tx,
             })
             .map_err(|_| ())?;
@@ -88,6 +118,10 @@ pub struct FailingTcpReplicationSink;
 
 impl ReplicationSink for FailingTcpReplicationSink {
     fn replicate(&mut self, _record: &ReplicationRecord) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn send_snapshot(&mut self, _bytes: &[u8]) -> Result<(), ()> {
         Err(())
     }
 }

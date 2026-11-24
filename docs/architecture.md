@@ -185,7 +185,7 @@ flowchart TD
 | `janus-serializer` | `Serializer` trait and RESP codec | `janus-types` |
 | `janus-protocol` | `Protocol` trait, RESP instance, and HTTP key/value adapter | `janus-types`, `janus-serializer`, `janus-kernel`, `http` |
 | `janus-transport` | Tokio TCP accept loop and connection instance; receives an already composed `Arc<Mutex<Kernel>>` | `janus-protocol`, `janus-serializer`, `janus-kernel` |
-| `janus-replication` | Length-prefixed replica-wire framing, primary `TcpReplicationSink`, replica accept/apply loop | `janus-kernel`, Tokio |
+| `janus-replication` | Length-prefixed replica-wire framing (records + Snapshot), primary `TcpReplicationSink`, replica accept/bootstrap/apply loop | `janus-kernel`, Tokio |
 | `janus-http3` | Optional HTTP/3 server edge over caller-configured Quinn endpoint | `janus-protocol`, `h3`, `h3-quinn`, `quinn`, `rustls`, Tokio |
 | `janus-capnp-rpc` | Optional Cap'n Proto RPC edge with one root capability per TCP connection | `janus-protocol`, `janus-kernel`, `capnp`, `capnp-rpc`, Tokio |
 | `janus-grpc` | Optional bidirectional gRPC session edge using Protocol Buffers | `janus-protocol`, `janus-kernel`, `tonic`, `prost`, Tokio |
@@ -230,14 +230,19 @@ No subsystem should require modifications in unrelated modules.
 # Replica wire
 
 When `--role primary` is set, the composition root attaches a `TcpReplicationSink` that
-frames each `ReplicationRecord` and sends it to `--replica-peer`. When `--role replica`
-is set, a second Tokio listener on `--replica-bind` accepts that channel and applies
-records through `apply_replication_record`. The Kernel stays network-blind and only
-calls `ReplicationSink::replicate` after successful local mutations. Framing decode
-errors or apply errors close the replica session; a failed send on the primary surfaces
-as `ERR replication failed` without rolling back the local write.
+connects to `--replica-peer`, runs a full-sync handoff (`Kernel::bootstrap_replica`:
+domain snapshot bytes from `export_snapshot`, framed as a Snapshot message), then
+streams each `ReplicationRecord`. When `--role replica` is set, a second Tokio listener
+on `--replica-bind` accepts that channel, imports a valid snapshot into storage, and
+applies catch-up records through `apply_replication_record`. The Kernel stays
+network-blind: it calls `ReplicationSink::send_snapshot` / `replicate` without knowing
+TCP. Framing decode errors, invalid snapshots (refused before import), or apply errors
+close the replica session; a failed send on the primary surfaces as
+`ERR replication failed` without rolling back the local write.
 
-Full sync / bootstrap, failover, and slot ownership are out of scope for this edge.
+**Bootstrap vs local SAVE:** full sync reuses the `JANUSNAP` codec as a wire payload.
+It does not require a shared filesystem or reading the operator’s `--dbfile` SAVE path.
+Partial sync / backlog offsets, failover, and slot ownership remain out of scope.
 
 # Future Architecture
 

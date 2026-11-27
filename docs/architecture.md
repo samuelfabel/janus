@@ -247,7 +247,13 @@ It does not require a shared filesystem or reading the operator’s `--dbfile` S
 primary endpoint, promotes a replica by stopping stream apply and enabling client
 writes, and publishes the new RESP endpoint via `ConfigAuthority`. The Kernel does
 not run Raft, gossip, or Sentinel. See [ops-ha.md](ops-ha.md). Partial sync /
-backlog offsets and multi-shard slot ownership remain out of scope.
+backlog offsets remain out of scope.
+
+**Domain slots:** the Kernel maps keys to Redis Cluster slots (`CRC16` mod 16384
+with `{hash tags}`) and may restrict local ownership via composition. Keys
+outside the owned set fail with a stable domain error that carries **no**
+host:port. MULTI/EXEC rejects cross-slot key sets. RESP `-MOVED` / `-ASK`,
+slot→endpoint discovery, and gossip stay at the edge / future work.
 
 # Future Architecture
 
@@ -255,7 +261,7 @@ Future versions may introduce additional layers.
 
 Examples:
 
-- Multi-shard slot map / resharding redirects
+- Client redirects (`MOVED` / `ASK`) and slot→endpoint maps at the protocol edge
 - Plugin system
 - Security
 

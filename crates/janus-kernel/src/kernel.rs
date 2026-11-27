@@ -14,6 +14,7 @@ use janus_storage::{
 use janus_types::{Command, Response};
 
 use crate::replication::{ReplicationRecord, ReplicationSink};
+use crate::slot::{SlotOwnership, slot};
 
 const ERR_SAVE_FAILED: &str = "ERR save failed";
 const ERR_SAVE_DISABLED: &str = "ERR save disabled";
@@ -26,6 +27,10 @@ const ERR_DISCARD_WITHOUT_MULTI: &str = "ERR DISCARD without MULTI";
 const ERR_AUTH_INVALID_PASSWORD: &str = "ERR invalid password";
 const ERR_AUTH_NOT_CONFIGURED: &str = "ERR AUTH called without any password configured";
 const ERR_AUTH_IN_MULTI: &str = "ERR AUTH inside MULTI is not allowed";
+/// Stable domain error when MULTI/EXEC keys hash to different slots (no host:port).
+const ERR_CROSSSLOT: &str = "CROSSSLOT Keys in request don't hash to the same slot";
+/// Stable domain miss when the key's slot is not owned locally (no host:port).
+const ERR_SLOT_NOT_OWNED: &str = "ERR slot not owned";
 
 /// Owned domain command held in a MULTI queue (keys/values copied at enqueue).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +73,51 @@ impl QueuedCommand {
             }
         }
     }
+
+    fn key(&self) -> Option<&[u8]> {
+        match self {
+            QueuedCommand::Set { key, .. }
+            | QueuedCommand::Get { key }
+            | QueuedCommand::Delete { key }
+            | QueuedCommand::Expire { key, .. }
+            | QueuedCommand::Ttl { key } => Some(key.as_slice()),
+            QueuedCommand::Save | QueuedCommand::Info | QueuedCommand::Traces => None,
+        }
+    }
+}
+
+fn command_key<'a>(command: &Command<'a>) -> Option<&'a [u8]> {
+    match command {
+        Command::Set { key, .. }
+        | Command::Get { key }
+        | Command::Delete { key }
+        | Command::Expire { key, .. }
+        | Command::Ttl { key } => Some(*key),
+        Command::Save
+        | Command::Multi
+        | Command::Exec
+        | Command::Discard
+        | Command::Info
+        | Command::Traces
+        | Command::Auth { .. } => None,
+    }
+}
+
+/// `Some(ERR_CROSSSLOT)` when queued keyed commands span more than one slot.
+fn cross_slot_error(queued: &[QueuedCommand]) -> Option<&'static str> {
+    let mut seen: Option<u16> = None;
+    for item in queued {
+        let Some(key) = item.key() else {
+            continue;
+        };
+        let key_slot = slot(key);
+        match seen {
+            None => seen = Some(key_slot),
+            Some(existing) if existing != key_slot => return Some(ERR_CROSSSLOT),
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 fn command_span_name(command: &Command<'_>) -> &'static str {
@@ -174,6 +224,10 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// writes fail with [`READONLY`](ERR_READONLY_REPLICA) until promotion.
 /// Replica-wire apply uses [`apply_replication_record`], which bypasses that
 /// gate.
+///
+/// Composition may restrict [`Kernel::owned_slots`] for multi-shard layouts.
+/// Keys outside the set fail with [`ERR_SLOT_NOT_OWNED`](ERR_SLOT_NOT_OWNED)
+/// (no host:port). Default ownership is every slot (single-node).
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     requirepass: Option<Vec<u8>>,
@@ -183,6 +237,8 @@ pub struct Kernel {
     replication: Option<Box<dyn ReplicationSink>>,
     /// When `false`, client write commands are rejected (replica / demoted node).
     accepts_writes: bool,
+    /// Slots this node owns (default: all 16384).
+    owned_slots: SlotOwnership,
     in_multi: bool,
     multi_queue: Vec<QueuedCommand>,
     total_commands: u64,
@@ -217,6 +273,7 @@ impl Kernel {
             wal: None,
             replication: None,
             accepts_writes: true,
+            owned_slots: SlotOwnership::all(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -248,6 +305,7 @@ impl Kernel {
             wal: None,
             replication: None,
             accepts_writes: true,
+            owned_slots: SlotOwnership::all(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -273,6 +331,7 @@ impl Kernel {
             wal: Some(wal),
             replication: None,
             accepts_writes: true,
+            owned_slots: SlotOwnership::all(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -304,6 +363,7 @@ impl Kernel {
             wal: None,
             replication: Some(sink),
             accepts_writes: true,
+            owned_slots: SlotOwnership::all(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -338,6 +398,22 @@ impl Kernel {
     /// Builder: start as a read-only replica for client writes.
     pub fn with_accepts_writes(mut self, accepts: bool) -> Self {
         self.accepts_writes = accepts;
+        self
+    }
+
+    /// Slots this Kernel owns (default: all 16384).
+    pub fn owned_slots(&self) -> &SlotOwnership {
+        &self.owned_slots
+    }
+
+    /// Replace local slot ownership (composition-owned; no host:port).
+    pub fn set_owned_slots(&mut self, ownership: SlotOwnership) {
+        self.owned_slots = ownership;
+    }
+
+    /// Builder: restrict which slots this Kernel owns.
+    pub fn with_owned_slots(mut self, ownership: SlotOwnership) -> Self {
+        self.owned_slots = ownership;
         self
     }
 
@@ -409,6 +485,9 @@ impl Kernel {
                 }
                 self.in_multi = false;
                 let queued = std::mem::take(&mut self.multi_queue);
+                if let Some(msg) = cross_slot_error(&queued) {
+                    return Response::Error(msg.to_string());
+                }
                 let mut results = Vec::with_capacity(queued.len());
                 for item in queued {
                     results.push(self.apply_queued(item));
@@ -467,6 +546,11 @@ impl Kernel {
     fn execute_immediate(&mut self, command: &Command<'_>) -> Response {
         self.total_commands = self.total_commands.saturating_add(1);
         self.record_span(command_span_name(command));
+        if let Some(key) = command_key(command) {
+            if !self.owned_slots.contains(slot(key)) {
+                return Response::Error(ERR_SLOT_NOT_OWNED.to_string());
+            }
+        }
         match command {
             Command::Set { key, value } => {
                 self.storage.set(key, value);
@@ -1433,18 +1517,19 @@ mod tests {
 
     #[test]
     fn multi_set_set_exec_get_hits() {
+        // Same-slot keys via hash tags (cross-slot MULTI is rejected separately).
         let mut kernel = Kernel::new(MemoryStorageEngine::new());
         assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
         assert_eq!(
             kernel.execute(&Command::Set {
-                key: b"a",
+                key: b"{t}a",
                 value: b"1",
             }),
             Response::Queued
         );
         assert_eq!(
             kernel.execute(&Command::Set {
-                key: b"b",
+                key: b"{t}b",
                 value: b"2",
             }),
             Response::Queued
@@ -1454,11 +1539,11 @@ mod tests {
             Response::Array(vec![Response::Empty, Response::Empty])
         );
         assert_eq!(
-            kernel.execute(&Command::Get { key: b"a" }),
+            kernel.execute(&Command::Get { key: b"{t}a" }),
             Response::Value(Some(b"1".to_vec()))
         );
         assert_eq!(
-            kernel.execute(&Command::Get { key: b"b" }),
+            kernel.execute(&Command::Get { key: b"{t}b" }),
             Response::Value(Some(b"2".to_vec()))
         );
     }
@@ -1868,5 +1953,111 @@ mod tests {
         for command in &non_writes {
             assert!(!is_write(command), "{command:?} should not be a write");
         }
+    }
+
+    #[test]
+    fn full_ownership_preserves_single_key_behavior() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert!(kernel.owned_slots().is_full());
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"foo",
+                value: b"1",
+            }),
+            Response::Empty
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"foo" }),
+            Response::Value(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            kernel.execute(&Command::Delete { key: b"foo" }),
+            Response::Deleted(true)
+        );
+    }
+
+    #[test]
+    fn partial_ownership_rejects_unowned_key_without_host_port() {
+        let foo_slot = crate::slot::slot(b"foo");
+        let mut kernel = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"foo",
+                value: b"ok",
+            }),
+            Response::Empty
+        );
+        let err = kernel.execute(&Command::Get { key: b"bar" });
+        assert_eq!(err, Response::Error(ERR_SLOT_NOT_OWNED.to_string()));
+        if let Response::Error(msg) = err {
+            assert!(!msg.contains(':'));
+            assert!(!msg.contains("MOVED"));
+        }
+    }
+
+    #[test]
+    fn multi_cross_slot_fails_with_stable_domain_error() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"foo",
+                value: b"1",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"bar",
+                value: b"2",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Error(ERR_CROSSSLOT.to_string())
+        );
+        // Transaction aborted: neither key was applied.
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"foo" }),
+            Response::Value(None)
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"bar" }),
+            Response::Value(None)
+        );
+    }
+
+    #[test]
+    fn multi_same_slot_hash_tags_succeed() {
+        let mut kernel = Kernel::new(MemoryStorageEngine::new());
+        assert_eq!(kernel.execute(&Command::Multi), Response::Empty);
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"{user}a",
+                value: b"1",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Set {
+                key: b"{user}b",
+                value: b"2",
+            }),
+            Response::Queued
+        );
+        assert_eq!(
+            kernel.execute(&Command::Exec),
+            Response::Array(vec![Response::Empty, Response::Empty])
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"{user}a" }),
+            Response::Value(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            kernel.execute(&Command::Get { key: b"{user}b" }),
+            Response::Value(Some(b"2".to_vec()))
+        );
     }
 }

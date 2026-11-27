@@ -30,4 +30,9 @@ pub enum Command<'a> {
     Traces,
     /// Check `password` against the configured `requirepass` (opaque bytes).
     Auth { password: &'a [u8] },
+    /// Redis Cluster discovery subset: return the slot→endpoint map.
+    ///
+    /// Handled at the RESP protocol edge (map lives in composition); the Kernel
+    /// never stores host:port.
+    ClusterSlots,
 }

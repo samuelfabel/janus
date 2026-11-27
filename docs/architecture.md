@@ -252,8 +252,13 @@ backlog offsets remain out of scope.
 **Domain slots:** the Kernel maps keys to Redis Cluster slots (`CRC16` mod 16384
 with `{hash tags}`) and may restrict local ownership via composition. Keys
 outside the owned set fail with a stable domain error that carries **no**
-host:port. MULTI/EXEC rejects cross-slot key sets. RESP `-MOVED` / `-ASK`,
-slot→endpoint discovery, and gossip stay at the edge / future work.
+host:port. MULTI/EXEC rejects cross-slot key sets.
+
+**Client redirects (subset):** composition may inject a `SlotEndpointMap` on the
+RESP protocol instance. Ownership misses become `-MOVED <slot> <host:port>`;
+`CLUSTER SLOTS` advertises the map. Cross-slot failures encode as stable RESP
+errors. `-ASK` / resharding and gossip remain out of scope — see
+[cluster-client.md](cluster-client.md).
 
 # Future Architecture
 
@@ -261,7 +266,7 @@ Future versions may introduce additional layers.
 
 Examples:
 
-- Client redirects (`MOVED` / `ASK`) and slot→endpoint maps at the protocol edge
+- `-ASK` redirects and slot migration / resharding
 - Plugin system
 - Security
 

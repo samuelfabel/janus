@@ -1,5 +1,5 @@
 //! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
-//! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH.
+//! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH / CLUSTER SLOTS.
 
 use janus_types::{Command, Response};
 
@@ -307,6 +307,32 @@ impl Serializer for RespSerializer {
                     consumed: cursor,
                 }
             }
+            b"CLUSTER" => {
+                if arg_count != 2 {
+                    return DecodeOutcome::Invalid {
+                        message: "CLUSTER arity",
+                    };
+                }
+                let sub = match read_bulk(input, &mut cursor) {
+                    BulkRead::Ok(v) => v,
+                    BulkRead::Incomplete => return DecodeOutcome::Incomplete,
+                    BulkRead::Invalid => {
+                        return DecodeOutcome::Invalid {
+                            message: "invalid CLUSTER subcommand",
+                        }
+                    }
+                };
+                let sub_upper = normalize_verb(sub);
+                if sub_upper.as_slice() != b"SLOTS" {
+                    return DecodeOutcome::UnknownCommand {
+                        name: format!("CLUSTER {}", String::from_utf8_lossy(sub)).into_bytes(),
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::ClusterSlots,
+                    consumed: cursor,
+                }
+            }
             _ => DecodeOutcome::UnknownCommand {
                 name: verb.to_vec(),
             },
@@ -387,6 +413,7 @@ mod tests {
     const INFO_FIXTURE: &[u8] = b"*1\r\n$4\r\nINFO\r\n";
     const TRACES_FIXTURE: &[u8] = b"*1\r\n$6\r\nTRACES\r\n";
     const AUTH_FIXTURE: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
+    const CLUSTER_SLOTS_FIXTURE: &[u8] = b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n";
 
     #[test]
     fn decode_set_fixture() {
@@ -1007,6 +1034,62 @@ mod tests {
         assert_eq!(
             s.encode(&protected.execute(&decode(AUTH_FIXTURE))),
             b"+OK\r\n"
+        );
+    }
+
+    #[test]
+    fn decode_cluster_slots_fixture() {
+        let s = RespSerializer;
+        match s.decode_one(CLUSTER_SLOTS_FIXTURE) {
+            DecodeOutcome::Ok {
+                command: Command::ClusterSlots,
+                consumed,
+            } => assert_eq!(consumed, CLUSTER_SLOTS_FIXTURE.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            s.decode_one(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nNODES\r\n"),
+            DecodeOutcome::UnknownCommand {
+                name: b"CLUSTER NODES".to_vec()
+            }
+        );
+        assert_eq!(
+            s.decode_one(b"*1\r\n$7\r\nCLUSTER\r\n"),
+            DecodeOutcome::Invalid {
+                message: "CLUSTER arity"
+            }
+        );
+    }
+
+    #[test]
+    fn encode_moved_and_crossslot_errors() {
+        let s = RespSerializer;
+        assert_eq!(
+            s.encode(&Response::Error("MOVED 12182 127.0.0.1:7001".into())),
+            b"-MOVED 12182 127.0.0.1:7001\r\n"
+        );
+        assert_eq!(
+            s.encode(&Response::Error(
+                "CROSSSLOT Keys in request don't hash to the same slot".into()
+            )),
+            b"-CROSSSLOT Keys in request don't hash to the same slot\r\n"
+        );
+    }
+
+    #[test]
+    fn encode_cluster_slots_nested_array() {
+        let s = RespSerializer;
+        let response = Response::Array(vec![Response::Array(vec![
+            Response::Integer(0),
+            Response::Integer(8191),
+            Response::Array(vec![
+                Response::Value(Some(b"127.0.0.1".to_vec())),
+                Response::Integer(7000),
+            ]),
+        ])]);
+        assert_eq!(
+            s.encode(&response),
+            b"*1\r\n*3\r\n:0\r\n:8191\r\n*2\r\n$9\r\n127.0.0.1\r\n:7000\r\n"
         );
     }
 }

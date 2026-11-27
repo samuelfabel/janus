@@ -2,10 +2,12 @@
 
 mod http_kv;
 pub mod resp;
+mod slot_map;
 pub mod types;
 
 pub use http_kv::{HttpKvProtocol, HttpProtocol};
 pub use resp::{execute_gated, RespProtocol};
+pub use slot_map::SlotEndpointMap;
 pub use types::ProtocolError;
 
 /// One connection's protocol orchestrator (no sockets).

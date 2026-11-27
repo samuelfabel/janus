@@ -28,9 +28,12 @@ const ERR_AUTH_INVALID_PASSWORD: &str = "ERR invalid password";
 const ERR_AUTH_NOT_CONFIGURED: &str = "ERR AUTH called without any password configured";
 const ERR_AUTH_IN_MULTI: &str = "ERR AUTH inside MULTI is not allowed";
 /// Stable domain error when MULTI/EXEC keys hash to different slots (no host:port).
-const ERR_CROSSSLOT: &str = "CROSSSLOT Keys in request don't hash to the same slot";
+pub const ERR_CROSSSLOT: &str = "CROSSSLOT Keys in request don't hash to the same slot";
 /// Stable domain miss when the key's slot is not owned locally (no host:port).
-const ERR_SLOT_NOT_OWNED: &str = "ERR slot not owned";
+///
+/// The RESP edge rewrites this into `-MOVED <slot> <endpoint>` when a slot map
+/// is configured (see `janus_protocol::SlotEndpointMap`).
+pub const ERR_SLOT_NOT_OWNED: &str = "ERR slot not owned";
 
 /// Owned domain command held in a MULTI queue (keys/values copied at enqueue).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +71,12 @@ impl QueuedCommand {
             Command::Save => QueuedCommand::Save,
             Command::Info => QueuedCommand::Info,
             Command::Traces => QueuedCommand::Traces,
-            Command::Multi | Command::Exec | Command::Discard | Command::Auth { .. } => {
-                unreachable!("transaction control and AUTH are not queued")
+            Command::Multi
+            | Command::Exec
+            | Command::Discard
+            | Command::Auth { .. }
+            | Command::ClusterSlots => {
+                unreachable!("transaction control, AUTH, and CLUSTER SLOTS are not queued")
             }
         }
     }
@@ -99,7 +106,8 @@ fn command_key<'a>(command: &Command<'a>) -> Option<&'a [u8]> {
         | Command::Discard
         | Command::Info
         | Command::Traces
-        | Command::Auth { .. } => None,
+        | Command::Auth { .. }
+        | Command::ClusterSlots => None,
     }
 }
 
@@ -134,6 +142,7 @@ fn command_span_name(command: &Command<'_>) -> &'static str {
         Command::Info => "INFO",
         Command::Traces => "TRACES",
         Command::Auth { .. } => "AUTH",
+        Command::ClusterSlots => "CLUSTER",
     }
 }
 
@@ -161,7 +170,8 @@ pub fn is_write(command: &Command<'_>) -> bool {
         | Command::Multi
         | Command::Exec
         | Command::Discard
-        | Command::Auth { .. } => false,
+        | Command::Auth { .. }
+        | Command::ClusterSlots => false,
     }
 }
 
@@ -628,6 +638,11 @@ impl Kernel {
             Command::Info => Response::Value(Some(self.format_info())),
             Command::Traces => Response::Value(Some(self.format_traces())),
             Command::Auth { password } => self.auth(password),
+            // Discovery is composition-owned; Protocol answers CLUSTER SLOTS from
+            // the slot map. Reaching the Kernel means no map was wired.
+            Command::ClusterSlots => {
+                Response::Error("ERR slot map not configured".to_string())
+            }
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control handled in execute")
             }
@@ -1946,6 +1961,7 @@ mod tests {
             Command::Exec,
             Command::Discard,
             Command::Auth { password: PASSWORD },
+            Command::ClusterSlots,
         ];
         for command in &writes {
             assert!(is_write(command), "{command:?} should be a write");

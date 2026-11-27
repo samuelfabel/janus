@@ -61,6 +61,7 @@ or semi-sync in this milestone.
 - Raft / Paxos / embedded etcd
 - Redis Cluster gossip (`PFAIL` / `FAIL`)
 - Redis Sentinel protocol compatibility
-- Multi-shard slot maps (`MOVED` / `ASK`)
+- `-ASK` / live slot migration (see [cluster-client.md](cluster-client.md) for the
+  `-MOVED` + `CLUSTER SLOTS` subset already available at the RESP edge)
 - TLS between nodes
 - Mandatory separate control-plane process (in-process supervisor or harness is enough)

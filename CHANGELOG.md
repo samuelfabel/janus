@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Domain slot map: Redis-compatible `key → slot` (CRC16 / 16384 + hash tags), Kernel `SlotOwnership` (default all slots), stable `ERR slot not owned` and `CROSSSLOT …` without host:port; unit tests in `janus-kernel` (no RESP `-MOVED` / cluster gossip)
 - Single-shard HA control plane: TCP health probe, in-process promote (`accepts_writes` + stop stream apply), `ConfigAuthority` (memory/file) publishing the current primary endpoint; ops guide in `docs/ops-ha.md`; e2e in `tests/failover_e2e.rs` (no Raft / Sentinel / gossip)
 - Kernel composition flag `accepts_writes` (replicas reject client writes with `READONLY …`; replica-wire apply bypasses the gate); `serve_replica_ha` / `promote_ha_replica` in the composition root
 - Replica full sync / bootstrap: primary sends a domain `JANUSNAP` Snapshot frame on connect (`Kernel::bootstrap_replica`), then streams records; replica imports only after a successful decode (invalid/truncated snapshots abort without partial state); distinct from local `SAVE` / `--dbfile`; e2e coverage in `tests/replica_wire_e2e.rs`

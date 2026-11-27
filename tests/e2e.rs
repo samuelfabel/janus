@@ -605,16 +605,17 @@ const MULTI: &[u8] = b"*1\r\n$5\r\nMULTI\r\n";
 const EXEC: &[u8] = b"*1\r\n$4\r\nEXEC\r\n";
 const DISCARD: &[u8] = b"*1\r\n$7\r\nDISCARD\r\n";
 
-/// V9-SCOPE: MULTI → SET a → SET b → EXEC → GET both hit.
+/// MULTI → SET same-slot keys (hash tags) → EXEC → GET both hit.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_multi_exec_get_hits() {
     let addr = start_server().await;
     let mut client = connect(&addr);
 
-    let set_a = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
-    let set_b = b"*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$1\r\n2\r\n";
-    let get_a = b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
-    let get_b = b"*2\r\n$3\r\nGET\r\n$1\r\nb\r\n";
+    // `{t}a` / `{t}b` share a slot; bare `a`/`b` would be CROSSSLOT on EXEC.
+    let set_a = b"*3\r\n$3\r\nSET\r\n$4\r\n{t}a\r\n$1\r\n1\r\n";
+    let set_b = b"*3\r\n$3\r\nSET\r\n$4\r\n{t}b\r\n$1\r\n2\r\n";
+    let get_a = b"*2\r\n$3\r\nGET\r\n$4\r\n{t}a\r\n";
+    let get_b = b"*2\r\n$3\r\nGET\r\n$4\r\n{t}b\r\n";
 
     client.write_all(MULTI).unwrap();
     assert_eq!(read_exact(&mut client, 5), b"+OK\r\n");

@@ -1,14 +1,17 @@
 //! RESP protocol instance: decode → kernel → encode → callback.
 use std::sync::{Arc, Mutex};
 
-use janus_kernel::{is_write, lock_kernel, Kernel, Role};
+use janus_kernel::{
+    is_write, lock_kernel, slot, ERR_SLOT_NOT_OWNED, Kernel, Role,
+};
 use janus_serializer::{DecodeOutcome, Serializer};
 use janus_types::{Command, Response};
 
-use crate::{Protocol, ProtocolError};
+use crate::{Protocol, ProtocolError, SlotEndpointMap};
 
 const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
 const ERR_NOPERM: &str = "NOPERM this connection is read-only";
+const ERR_SLOT_MAP_MISSING: &str = "ERR slot map not configured";
 
 /// RESP protocol instance bound to a kernel and serializer.
 ///
@@ -22,6 +25,9 @@ const ERR_NOPERM: &str = "NOPERM this connection is read-only";
 /// `AUTH` sets the role from the password used; a failed one keeps the current
 /// role. A [`Role::ReadOnly`] connection gets [`ERR_NOPERM`] for write
 /// commands, which never reach the Kernel (so they are not queued in `MULTI`).
+///
+/// When composition injects a [`SlotEndpointMap`], ownership misses become
+/// `-MOVED <slot> <endpoint>` and `CLUSTER SLOTS` returns the configured map.
 pub struct RespProtocol<S>
 where
     S: Serializer,
@@ -29,6 +35,7 @@ where
     kernel: Arc<Mutex<Kernel>>,
     serializer: S,
     role: Option<Role>,
+    slot_map: Option<Arc<SlotEndpointMap>>,
 }
 
 impl<S> RespProtocol<S>
@@ -46,7 +53,14 @@ where
             kernel,
             serializer,
             role: None,
+            slot_map: None,
         }
+    }
+
+    /// Attach a composition-owned slot→endpoint map (MOVED + CLUSTER SLOTS).
+    pub fn with_slot_map(mut self, map: Arc<SlotEndpointMap>) -> Self {
+        self.slot_map = Some(map);
+        self
     }
 }
 
@@ -106,10 +120,7 @@ where
             match self.serializer.decode_one(&buffer[offset..]) {
                 DecodeOutcome::Incomplete => return Ok(offset),
                 DecodeOutcome::Ok { command, consumed } => {
-                    let response = {
-                        let mut kernel = lock_kernel(&self.kernel);
-                        execute_gated(&mut kernel, &mut self.role, &command)
-                    };
+                    let response = self.dispatch(&command);
                     let encoded = self.serializer.encode(&response);
                     callback(&encoded);
                     offset += consumed;
@@ -127,13 +138,77 @@ where
     }
 }
 
+impl<S> RespProtocol<S>
+where
+    S: Serializer,
+{
+    fn dispatch(&mut self, command: &Command<'_>) -> Response {
+        if matches!(command, Command::ClusterSlots) {
+            return self.cluster_slots();
+        }
+        let response = {
+            let mut kernel = lock_kernel(&self.kernel);
+            execute_gated(&mut kernel, &mut self.role, command)
+        };
+        rewrite_moved(command, response, self.slot_map.as_deref())
+    }
+
+    fn cluster_slots(&mut self) -> Response {
+        {
+            let kernel = lock_kernel(&self.kernel);
+            if kernel.auth_required() && self.role.is_none() {
+                return Response::Error(ERR_NOAUTH.to_string());
+            }
+        }
+        match self.slot_map.as_ref() {
+            Some(map) => map.cluster_slots_response(),
+            None => Response::Error(ERR_SLOT_MAP_MISSING.to_string()),
+        }
+    }
+}
+
+/// Translate a domain ownership miss into Redis `-MOVED` when a map is present.
+fn rewrite_moved(
+    command: &Command<'_>,
+    response: Response,
+    slot_map: Option<&SlotEndpointMap>,
+) -> Response {
+    let Some(map) = slot_map else {
+        return response;
+    };
+    match response {
+        Response::Error(msg) if msg == ERR_SLOT_NOT_OWNED => {
+            let Some(key) = command_key(command) else {
+                return Response::Error(msg);
+            };
+            let key_slot = slot(key);
+            match map.endpoint_for_slot(key_slot) {
+                Some(endpoint) => Response::Error(format!("MOVED {key_slot} {endpoint}")),
+                None => Response::Error(msg),
+            }
+        }
+        other => other,
+    }
+}
+
+fn command_key<'a>(command: &Command<'a>) -> Option<&'a [u8]> {
+    match command {
+        Command::Set { key, .. }
+        | Command::Get { key }
+        | Command::Delete { key }
+        | Command::Expire { key, .. }
+        | Command::Ttl { key } => Some(*key),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
-    use janus_kernel::Kernel;
+    use janus_kernel::{Kernel, SlotOwnership};
     use janus_serializer::RespSerializer;
     use janus_storage::memory::MemoryStorageEngine;
 
@@ -563,5 +638,81 @@ mod tests {
         let traces = String::from_utf8(traces).unwrap();
         assert!(!traces.contains("SET"), "unexpected TRACES: {traces}");
         assert!(!traces.contains("DEL"), "unexpected TRACES: {traces}");
+    }
+
+    const CLUSTER_SLOTS: &[u8] = b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n";
+    const GET_FOO: &[u8] = b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    const SET_FOO: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n";
+    const SET_USER_A: &[u8] = b"*3\r\n$3\r\nSET\r\n$7\r\n{user}a\r\n$1\r\n1\r\n";
+    const SET_USER_B: &[u8] = b"*3\r\n$3\r\nSET\r\n$7\r\n{user}b\r\n$1\r\n2\r\n";
+    const SET_BAR: &[u8] = b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n";
+
+    fn sharded_protocol() -> RespProtocol<RespSerializer> {
+        // foo → 12182, bar → 5061; only own bar's slot locally.
+        let bar_slot = janus_kernel::slot(b"bar");
+        let kernel = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([bar_slot]));
+        let map = Arc::new(SlotEndpointMap::from_ranges([
+            (0u16, 8191, "127.0.0.1:7000"),
+            (8192, 16383, "127.0.0.1:7001"),
+        ]));
+        RespProtocol::new(kernel, RespSerializer).with_slot_map(map)
+    }
+
+    #[test]
+    fn remote_slot_becomes_moved_with_endpoint() {
+        let mut p = sharded_protocol();
+        let out = run(&mut p, GET_FOO);
+        assert_eq!(out, vec![b"-MOVED 12182 127.0.0.1:7001\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn owned_slot_succeeds() {
+        let mut p = sharded_protocol();
+        assert_eq!(run(&mut p, SET_BAR), vec![b"+OK\r\n".to_vec()]);
+    }
+
+    #[test]
+    fn cluster_slots_returns_configured_map() {
+        let mut p = sharded_protocol();
+        let encoded = run(&mut p, CLUSTER_SLOTS).concat();
+        let body = String::from_utf8_lossy(&encoded);
+        assert!(body.starts_with("*2\r\n"), "got {body:?}");
+        assert!(body.contains("127.0.0.1"));
+        assert!(body.contains(":7000\r\n") || body.contains("7000"));
+        assert!(body.contains("7001"));
+    }
+
+    #[test]
+    fn cluster_slots_without_map_errors() {
+        let mut p = protocol();
+        assert_eq!(
+            run(&mut p, CLUSTER_SLOTS),
+            vec![b"-ERR slot map not configured\r\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn cross_slot_multi_is_stable_resp_error() {
+        let mut p = protocol();
+        assert_eq!(run(&mut p, MULTI), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_FOO), vec![b"+QUEUED\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_BAR), vec![b"+QUEUED\r\n".to_vec()]);
+        assert_eq!(
+            run(&mut p, EXEC),
+            vec![b"-CROSSSLOT Keys in request don't hash to the same slot\r\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn same_slot_hash_tags_succeed_over_resp() {
+        let mut p = protocol();
+        assert_eq!(run(&mut p, MULTI), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_USER_A), vec![b"+QUEUED\r\n".to_vec()]);
+        assert_eq!(run(&mut p, SET_USER_B), vec![b"+QUEUED\r\n".to_vec()]);
+        assert_eq!(
+            run(&mut p, EXEC),
+            vec![b"*2\r\n+OK\r\n+OK\r\n".to_vec()]
+        );
     }
 }

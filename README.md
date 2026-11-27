@@ -22,6 +22,7 @@ Janus explores protocols, storage engines, and cache building blocks behind a sm
 - Optional gRPC edge (`janus-grpc`) exposes the same command/response domain over a dedicated TCP listener; enable it with Cargo `--features grpc`, then select gRPC alone or alongside RESP while both listeners share one Kernel
 - Optional REST API (`janus-rest`) maps the command surface to HTTP routes on a dedicated TCP listener; enable it with Cargo `--features rest`, then select REST alone or alongside RESP
 - Optional TCP **primary → replica** wire (`janus-replication`) with `--role primary|replica`, plus in-process single-shard HA helpers (health probe, promote, config authority) — no Raft / Sentinel / cluster gossip
+- Redis Cluster **client subset** at the RESP edge: composition-owned slot→endpoint map, `-MOVED` redirects, `CLUSTER SLOTS`, stable cross-slot errors (no ASK / gossip / proxy) — see [docs/cluster-client.md](docs/cluster-client.md)
 - **Transactions**: Redis-style `MULTI` / `EXEC` / `DISCARD` (command queue + commit/abort; no WATCH / ACID guarantees)
 - **Metrics**: Kernel counters exposed through `INFO`
 - **Tracing**: Kernel span ring buffer exposed through `TRACES`
@@ -42,7 +43,9 @@ This project does **not**:
 
 TCP listen with RESP `SET` / `GET` / `DEL` / `EXPIRE` / `TTL` / `SAVE` / `MULTI` / `EXEC` / `DISCARD` / `INFO` / `TRACES` / `AUTH` over a pluggable in-memory store (lazy key expiry, optional snapshot file or WAL). Networking uses **Tokio** (`#[tokio::main]`, task per connection); all connections share one Kernel under a `Mutex`. The composition root injects storage via `build_storage()` — **Memory** by default; `BTreeStorageEngine` proves the plugin seam in tests. Default bind `0.0.0.0:6380`.
 
-**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the primary connects to the replica wire, sends a **full-sync domain snapshot** (`export_snapshot` / `JANUSNAP` over the replica channel — not the operator’s local `SAVE` / `--dbfile` path), then streams Set / Delete / Expire records. With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire, imports the snapshot into empty storage, and applies catch-up records via `apply_replication_record`; `--bind` remains the RESP client listener and **rejects client writes** until promotion. During the snapshot handoff the primary holds exclusive Kernel access (writes pause for that critical section). Single-shard HA uses an external config authority plus a supervisor that detects a dead primary (TCP health timeout), promotes a replica (`REPLICAOF NO ONE` conceptually), and publishes the new endpoint — see [docs/ops-ha.md](docs/ops-ha.md). Async replication implies a loss window on failover. Partial sync / backlog offsets and multi-shard slot redirects are not included yet.
+**Replication:** default `cargo run` stays **single-node** (no replica channel). With `--role primary --replica-peer <ADDR>` the primary connects to the replica wire, sends a **full-sync domain snapshot** (`export_snapshot` / `JANUSNAP` over the replica channel — not the operator’s local `SAVE` / `--dbfile` path), then streams Set / Delete / Expire records. With `--role replica --replica-bind <ADDR>` a separate listener accepts that wire, imports the snapshot into empty storage, and applies catch-up records via `apply_replication_record`; `--bind` remains the RESP client listener and **rejects client writes** until promotion. During the snapshot handoff the primary holds exclusive Kernel access (writes pause for that critical section). Single-shard HA uses an external config authority plus a supervisor that detects a dead primary (TCP health timeout), promotes a replica (`REPLICAOF NO ONE` conceptually), and publishes the new endpoint — see [docs/ops-ha.md](docs/ops-ha.md). Async replication implies a loss window on failover. Partial sync / backlog offsets are not included yet.
+
+**Cluster client subset:** keys hash to Redis Cluster slots (CRC16 / 16384 + hash tags). Composition may restrict Kernel slot ownership and inject a `SlotEndpointMap` on the RESP protocol so remote keys return `-MOVED <slot> <host:port>` and clients can discover topology via `CLUSTER SLOTS`. Cross-slot `MULTI`/`EXEC` returns a stable `-CROSSSLOT …` error. Default single-node owns every slot. ASK / resharding / gossip are out of scope — see [docs/cluster-client.md](docs/cluster-client.md).
 
 **Transactions:** `MULTI` queues subsequent commands; `EXEC` applies them in order and returns a RESP array of results; `DISCARD` aborts without applying. WATCH, nested MULTI, and distributed transactions are not supported.
 
@@ -200,6 +203,8 @@ npm run build
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Cluster client subset](docs/cluster-client.md)
+- [Single-shard HA ops](docs/ops-ha.md)
 - [Vision](docs/vision.md)
 - [Roadmap](docs/roadmap.md)
 - [Glossary](docs/glossary.md)

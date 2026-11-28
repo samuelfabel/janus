@@ -2,6 +2,8 @@
 //!
 //! Lives at the protocol / control-plane edge. The Kernel never stores host:port.
 
+use std::collections::HashMap;
+
 use janus_kernel::SLOT_COUNT;
 use janus_types::Response;
 
@@ -58,6 +60,20 @@ impl SlotEndpointMap {
             .map(|r| r.endpoint.as_str())
     }
 
+    /// Reassign a single slot to `endpoint` (control-plane resharding finish).
+    ///
+    /// Appends an overlapping one-slot range; later ranges win on lookup.
+    pub fn assign_slot(&mut self, slot: u16, endpoint: impl Into<String>) {
+        if slot >= SLOT_COUNT {
+            return;
+        }
+        self.ranges.push(SlotRange {
+            start: slot,
+            end: slot,
+            endpoint: endpoint.into(),
+        });
+    }
+
     /// Redis-compatible `CLUSTER SLOTS` nested array (subset: master only, no node id).
     ///
     /// Each entry is `[start, end, [host, port]]`.
@@ -77,6 +93,49 @@ impl SlotEndpointMap {
             ]));
         }
         Response::Array(entries)
+    }
+}
+
+/// Slot → destination endpoint for `-ASK` while a migration is active.
+///
+/// Composition / control plane owns this map; the Kernel never stores host:port.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AskEndpointMap {
+    destinations: HashMap<u16, String>,
+}
+
+impl AskEndpointMap {
+    /// Empty map (no active ASK redirects).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build from `(slot, destination endpoint)` pairs.
+    pub fn from_slots(slots: impl IntoIterator<Item = (u16, impl Into<String>)>) -> Self {
+        let mut destinations = HashMap::new();
+        for (slot, endpoint) in slots {
+            if slot < SLOT_COUNT {
+                destinations.insert(slot, endpoint.into());
+            }
+        }
+        Self { destinations }
+    }
+
+    /// Destination endpoint for an in-flight migration of `slot`.
+    pub fn endpoint_for_slot(&self, slot: u16) -> Option<&str> {
+        self.destinations.get(&slot).map(String::as_str)
+    }
+
+    /// Advertise ASK target while `slot` is migrating to `endpoint`.
+    pub fn set_destination(&mut self, slot: u16, endpoint: impl Into<String>) {
+        if slot < SLOT_COUNT {
+            self.destinations.insert(slot, endpoint.into());
+        }
+    }
+
+    /// Clear ASK target after migration finishes (or is aborted).
+    pub fn clear_destination(&mut self, slot: u16) {
+        self.destinations.remove(&slot);
     }
 }
 
@@ -143,5 +202,22 @@ mod tests {
             map.endpoint_for_slot(SLOT_COUNT - 1),
             Some("10.0.0.1:6380")
         );
+    }
+
+    #[test]
+    fn assign_slot_overrides_lookup() {
+        let mut map = SlotEndpointMap::from_ranges([(0u16, 16383, "127.0.0.1:7000")]);
+        map.assign_slot(12182, "127.0.0.1:7001");
+        assert_eq!(map.endpoint_for_slot(12182), Some("127.0.0.1:7001"));
+        assert_eq!(map.endpoint_for_slot(0), Some("127.0.0.1:7000"));
+    }
+
+    #[test]
+    fn ask_map_set_and_clear() {
+        let mut ask = AskEndpointMap::new();
+        ask.set_destination(12182, "127.0.0.1:7001");
+        assert_eq!(ask.endpoint_for_slot(12182), Some("127.0.0.1:7001"));
+        ask.clear_destination(12182);
+        assert_eq!(ask.endpoint_for_slot(12182), None);
     }
 }

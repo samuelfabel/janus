@@ -1,5 +1,5 @@
 //! RESP2 subset codec for SET / GET / DEL(DELETE) / EXPIRE / TTL / SAVE /
-//! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH / CLUSTER SLOTS.
+//! MULTI / EXEC / DISCARD / INFO / TRACES / AUTH / CLUSTER SLOTS / ASKING.
 
 use janus_types::{Command, Response};
 
@@ -330,6 +330,17 @@ impl Serializer for RespSerializer {
                 }
                 DecodeOutcome::Ok {
                     command: Command::ClusterSlots,
+                    consumed: cursor,
+                }
+            }
+            b"ASKING" => {
+                if arg_count != 1 {
+                    return DecodeOutcome::Invalid {
+                        message: "ASKING arity",
+                    };
+                }
+                DecodeOutcome::Ok {
+                    command: Command::Asking,
                     consumed: cursor,
                 }
             }
@@ -1062,11 +1073,34 @@ mod tests {
     }
 
     #[test]
+    fn decode_asking_fixture() {
+        let s = RespSerializer;
+        const ASKING: &[u8] = b"*1\r\n$6\r\nASKING\r\n";
+        match s.decode_one(ASKING) {
+            DecodeOutcome::Ok {
+                command: Command::Asking,
+                consumed,
+            } => assert_eq!(consumed, ASKING.len()),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            s.decode_one(b"*2\r\n$6\r\nASKING\r\n$3\r\nxxx\r\n"),
+            DecodeOutcome::Invalid {
+                message: "ASKING arity"
+            }
+        );
+    }
+
+    #[test]
     fn encode_moved_and_crossslot_errors() {
         let s = RespSerializer;
         assert_eq!(
             s.encode(&Response::Error("MOVED 12182 127.0.0.1:7001".into())),
             b"-MOVED 12182 127.0.0.1:7001\r\n"
+        );
+        assert_eq!(
+            s.encode(&Response::Error("ASK 12182 127.0.0.1:7001".into())),
+            b"-ASK 12182 127.0.0.1:7001\r\n"
         );
         assert_eq!(
             s.encode(&Response::Error(

@@ -35,4 +35,9 @@ pub enum Command<'a> {
     /// Handled at the RESP protocol edge (map lives in composition); the Kernel
     /// never stores host:port.
     ClusterSlots,
+    /// One-shot import bypass for the next keyed command (Redis `ASKING`).
+    ///
+    /// Handled at the RESP protocol edge as a per-connection flag; the Kernel
+    /// never stores host:port.
+    Asking,
 }

@@ -51,6 +51,42 @@ impl SlotOwnership {
             OwnershipKind::Set(set) => set.len() == SLOT_COUNT as usize,
         }
     }
+
+    /// Add `slot` to the owned set (no-op when already full / already present).
+    pub fn insert(&mut self, slot: u16) {
+        if slot >= SLOT_COUNT {
+            return;
+        }
+        match &mut self.kind {
+            OwnershipKind::All => {}
+            OwnershipKind::Set(set) => {
+                set.insert(slot);
+                if set.len() == SLOT_COUNT as usize {
+                    self.kind = OwnershipKind::All;
+                }
+            }
+        }
+    }
+
+    /// Remove `slot` from ownership.
+    ///
+    /// Removing from a full map materializes an explicit set of the remaining
+    /// slots (rare control-plane path during resharding).
+    pub fn remove(&mut self, slot: u16) {
+        if slot >= SLOT_COUNT {
+            return;
+        }
+        match &mut self.kind {
+            OwnershipKind::All => {
+                let mut set: HashSet<u16> = (0..SLOT_COUNT).collect();
+                set.remove(&slot);
+                self.kind = OwnershipKind::Set(set);
+            }
+            OwnershipKind::Set(set) => {
+                set.remove(&slot);
+            }
+        }
+    }
 }
 
 impl Default for SlotOwnership {
@@ -80,5 +116,15 @@ mod tests {
         assert!(ownership.contains(12182));
         assert!(ownership.contains(5061));
         assert!(!ownership.contains(0));
+    }
+
+    #[test]
+    fn insert_and_remove_update_set() {
+        let mut ownership = SlotOwnership::from_slots([5061u16]);
+        ownership.insert(12182);
+        assert!(ownership.contains(12182));
+        ownership.remove(5061);
+        assert!(!ownership.contains(5061));
+        assert!(ownership.contains(12182));
     }
 }

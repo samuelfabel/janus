@@ -1,6 +1,7 @@
 //! Redis-compatible key → slot mapping and local ownership (domain only).
 //!
-//! No RESP `-MOVED` / `-ASK` and no slot→endpoint map — those belong at the edge.
+//! Transient MIGRATING / IMPORTING flags live on the Kernel; RESP `-MOVED` /
+//! `-ASK` and slot→endpoint maps belong at the edge.
 
 mod crc16;
 mod hash_tag;

@@ -2,12 +2,12 @@
 use std::sync::{Arc, Mutex};
 
 use janus_kernel::{
-    is_write, lock_kernel, slot, ERR_SLOT_NOT_OWNED, Kernel, Role,
+    is_write, lock_kernel, slot, ERR_SLOT_MIGRATING, ERR_SLOT_NOT_OWNED, Kernel, Role,
 };
 use janus_serializer::{DecodeOutcome, Serializer};
 use janus_types::{Command, Response};
 
-use crate::{Protocol, ProtocolError, SlotEndpointMap};
+use crate::{AskEndpointMap, Protocol, ProtocolError, SlotEndpointMap};
 
 const ERR_NOAUTH: &str = "NOAUTH Authentication required.";
 const ERR_NOPERM: &str = "NOPERM this connection is read-only";
@@ -28,6 +28,9 @@ const ERR_SLOT_MAP_MISSING: &str = "ERR slot map not configured";
 ///
 /// When composition injects a [`SlotEndpointMap`], ownership misses become
 /// `-MOVED <slot> <endpoint>` and `CLUSTER SLOTS` returns the configured map.
+/// An optional [`AskEndpointMap`] rewrites migrating-slot domain signals into
+/// `-ASK <slot> <endpoint>`. `ASKING` sets a one-shot per-connection flag so the
+/// next keyed command may hit an IMPORTING slot on this node.
 pub struct RespProtocol<S>
 where
     S: Serializer,
@@ -35,7 +38,10 @@ where
     kernel: Arc<Mutex<Kernel>>,
     serializer: S,
     role: Option<Role>,
-    slot_map: Option<Arc<SlotEndpointMap>>,
+    slot_map: Option<Arc<Mutex<SlotEndpointMap>>>,
+    ask_map: Option<Arc<Mutex<AskEndpointMap>>>,
+    /// One-shot Redis `ASKING` flag for the next domain command on this connection.
+    asking: bool,
 }
 
 impl<S> RespProtocol<S>
@@ -54,12 +60,23 @@ where
             serializer,
             role: None,
             slot_map: None,
+            ask_map: None,
+            asking: false,
         }
     }
 
     /// Attach a composition-owned slot→endpoint map (MOVED + CLUSTER SLOTS).
-    pub fn with_slot_map(mut self, map: Arc<SlotEndpointMap>) -> Self {
+    ///
+    /// Accepts a shared mutex so the control plane can reassign slots after
+    /// resharding without rebuilding every connection.
+    pub fn with_slot_map(mut self, map: Arc<Mutex<SlotEndpointMap>>) -> Self {
         self.slot_map = Some(map);
+        self
+    }
+
+    /// Attach ASK destinations for in-flight slot migrations.
+    pub fn with_ask_map(mut self, map: Arc<Mutex<AskEndpointMap>>) -> Self {
+        self.ask_map = Some(map);
         self
     }
 }
@@ -76,23 +93,7 @@ pub fn execute_gated(
     role: &mut Option<Role>,
     command: &Command<'_>,
 ) -> Response {
-    if kernel.auth_required() {
-        match (*role, command) {
-            (None, Command::Auth { .. }) => {}
-            (None, _) => return Response::Error(ERR_NOAUTH.to_string()),
-            (Some(Role::ReadOnly), cmd) if is_write(cmd) => {
-                return Response::Error(ERR_NOPERM.to_string());
-            }
-            _ => {}
-        }
-    }
-    let response = kernel.execute(command);
-    if let Command::Auth { password } = command {
-        if response == Response::Empty {
-            *role = kernel.role_for(password);
-        }
-    }
-    response
+    execute_gated_asking(kernel, role, command, false)
 }
 
 impl<S> Protocol for RespProtocol<S>
@@ -146,11 +147,32 @@ where
         if matches!(command, Command::ClusterSlots) {
             return self.cluster_slots();
         }
+        if matches!(command, Command::Asking) {
+            return self.handle_asking();
+        }
+        let asking = self.asking;
+        self.asking = false;
         let response = {
             let mut kernel = lock_kernel(&self.kernel);
-            execute_gated(&mut kernel, &mut self.role, command)
+            execute_gated_asking(&mut kernel, &mut self.role, command, asking)
         };
-        rewrite_moved(command, response, self.slot_map.as_deref())
+        rewrite_redirects(
+            command,
+            response,
+            self.slot_map.as_deref(),
+            self.ask_map.as_deref(),
+        )
+    }
+
+    fn handle_asking(&mut self) -> Response {
+        {
+            let kernel = lock_kernel(&self.kernel);
+            if kernel.auth_required() && self.role.is_none() {
+                return Response::Error(ERR_NOAUTH.to_string());
+            }
+        }
+        self.asking = true;
+        Response::Empty
     }
 
     fn cluster_slots(&mut self) -> Response {
@@ -161,28 +183,83 @@ where
             }
         }
         match self.slot_map.as_ref() {
-            Some(map) => map.cluster_slots_response(),
+            Some(map) => map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cluster_slots_response(),
             None => Response::Error(ERR_SLOT_MAP_MISSING.to_string()),
         }
     }
 }
 
-/// Translate a domain ownership miss into Redis `-MOVED` when a map is present.
-fn rewrite_moved(
+/// Run `command` on the locked kernel with optional one-shot IMPORTING access.
+pub fn execute_gated_asking(
+    kernel: &mut Kernel,
+    role: &mut Option<Role>,
+    command: &Command<'_>,
+    asking: bool,
+) -> Response {
+    if kernel.auth_required() {
+        match (*role, command) {
+            (None, Command::Auth { .. }) => {}
+            (None, _) => return Response::Error(ERR_NOAUTH.to_string()),
+            (Some(Role::ReadOnly), cmd) if is_write(cmd) => {
+                return Response::Error(ERR_NOPERM.to_string());
+            }
+            _ => {}
+        }
+    }
+    let response = if asking {
+        kernel.execute_asking(command)
+    } else {
+        kernel.execute(command)
+    };
+    if let Command::Auth { password } = command {
+        if response == Response::Empty {
+            *role = kernel.role_for(password);
+        }
+    }
+    response
+}
+
+/// Translate domain slot misses into Redis `-MOVED` / `-ASK` when maps are present.
+fn rewrite_redirects(
     command: &Command<'_>,
     response: Response,
-    slot_map: Option<&SlotEndpointMap>,
+    slot_map: Option<&Mutex<SlotEndpointMap>>,
+    ask_map: Option<&Mutex<AskEndpointMap>>,
 ) -> Response {
-    let Some(map) = slot_map else {
-        return response;
-    };
     match response {
-        Response::Error(msg) if msg == ERR_SLOT_NOT_OWNED => {
+        Response::Error(msg) if msg == ERR_SLOT_MIGRATING => {
             let Some(key) = command_key(command) else {
                 return Response::Error(msg);
             };
             let key_slot = slot(key);
-            match map.endpoint_for_slot(key_slot) {
+            let endpoint = ask_map.and_then(|m| {
+                m.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .endpoint_for_slot(key_slot)
+                    .map(str::to_string)
+            });
+            match endpoint {
+                Some(endpoint) => Response::Error(format!("ASK {key_slot} {endpoint}")),
+                None => Response::Error(msg),
+            }
+        }
+        Response::Error(msg) if msg == ERR_SLOT_NOT_OWNED => {
+            let Some(map) = slot_map else {
+                return Response::Error(msg);
+            };
+            let Some(key) = command_key(command) else {
+                return Response::Error(msg);
+            };
+            let key_slot = slot(key);
+            let endpoint = map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .endpoint_for_slot(key_slot)
+                .map(str::to_string);
+            match endpoint {
                 Some(endpoint) => Response::Error(format!("MOVED {key_slot} {endpoint}")),
                 None => Response::Error(msg),
             }
@@ -652,10 +729,10 @@ mod tests {
         let bar_slot = janus_kernel::slot(b"bar");
         let kernel = Kernel::new(MemoryStorageEngine::new())
             .with_owned_slots(SlotOwnership::from_slots([bar_slot]));
-        let map = Arc::new(SlotEndpointMap::from_ranges([
+        let map = Arc::new(Mutex::new(SlotEndpointMap::from_ranges([
             (0u16, 8191, "127.0.0.1:7000"),
             (8192, 16383, "127.0.0.1:7001"),
-        ]));
+        ])));
         RespProtocol::new(kernel, RespSerializer).with_slot_map(map)
     }
 
@@ -713,6 +790,96 @@ mod tests {
         assert_eq!(
             run(&mut p, EXEC),
             vec![b"*2\r\n+OK\r\n+OK\r\n".to_vec()]
+        );
+    }
+
+    const ASKING: &[u8] = b"*1\r\n$6\r\nASKING\r\n";
+
+    #[test]
+    fn migrating_missing_key_becomes_ask() {
+        let foo_slot = janus_kernel::slot(b"foo");
+        let mut source_kernel = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        source_kernel.begin_migrating(foo_slot);
+        let map = Arc::new(Mutex::new(SlotEndpointMap::from_ranges([(
+            0u16,
+            16383,
+            "127.0.0.1:7000",
+        )])));
+        let ask = Arc::new(Mutex::new(AskEndpointMap::from_slots([(
+            foo_slot,
+            "127.0.0.1:7001",
+        )])));
+        let mut p = RespProtocol::new(source_kernel, RespSerializer)
+            .with_slot_map(map)
+            .with_ask_map(ask);
+        let out = run(&mut p, GET_FOO);
+        assert_eq!(
+            out,
+            vec![format!("-ASK {foo_slot} 127.0.0.1:7001\r\n").into_bytes()]
+        );
+    }
+
+    #[test]
+    fn asking_allows_one_importing_query_then_moved_without() {
+        use crate::AskEndpointMap;
+
+        let foo_slot = janus_kernel::slot(b"foo");
+        let mut source_kernel = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        assert_eq!(
+            source_kernel.execute(&janus_types::Command::Set {
+                key: b"foo",
+                value: b"v",
+            }),
+            janus_types::Response::Empty
+        );
+        source_kernel.begin_migrating(foo_slot);
+
+        let mut dest_kernel =
+            Kernel::new(MemoryStorageEngine::new()).with_owned_slots(SlotOwnership::from_slots([]));
+        dest_kernel.begin_importing(foo_slot);
+        let entries = source_kernel.export_slot(foo_slot);
+        dest_kernel.import_slot_entries(&entries);
+
+        let map = Arc::new(Mutex::new(SlotEndpointMap::from_ranges([(
+            0u16,
+            16383,
+            "127.0.0.1:7000",
+        )])));
+        let ask = Arc::new(Mutex::new(AskEndpointMap::from_slots([(
+            foo_slot,
+            "127.0.0.1:7001",
+        )])));
+
+        let source_shared = Arc::new(Mutex::new(source_kernel));
+        let dest_shared = Arc::new(Mutex::new(dest_kernel));
+        let mut source = RespProtocol::shared(Arc::clone(&source_shared), RespSerializer)
+            .with_slot_map(Arc::clone(&map))
+            .with_ask_map(Arc::clone(&ask));
+        let mut dest = RespProtocol::shared(Arc::clone(&dest_shared), RespSerializer)
+            .with_slot_map(Arc::clone(&map))
+            .with_ask_map(ask);
+
+        assert_eq!(run(&mut dest, ASKING), vec![b"+OK\r\n".to_vec()]);
+        assert_eq!(run(&mut dest, GET_FOO), vec![b"$1\r\nv\r\n".to_vec()]);
+        // Without a fresh ASKING, IMPORTING slot stays a stable MOVED to the map owner.
+        assert_eq!(
+            run(&mut dest, GET_FOO),
+            vec![format!("-MOVED {foo_slot} 127.0.0.1:7000\r\n").into_bytes()]
+        );
+
+        {
+            let mut sk = lock_kernel(&source_shared);
+            let mut dk = lock_kernel(&dest_shared);
+            sk.finish_migrate_source(foo_slot);
+            dk.finish_migrate_destination(foo_slot);
+            map.lock().unwrap().assign_slot(foo_slot, "127.0.0.1:7001");
+        }
+        assert_eq!(run(&mut dest, GET_FOO), vec![b"$1\r\nv\r\n".to_vec()]);
+        assert_eq!(
+            run(&mut source, GET_FOO),
+            vec![format!("-MOVED {foo_slot} 127.0.0.1:7001\r\n").into_bytes()]
         );
     }
 }

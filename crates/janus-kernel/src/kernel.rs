@@ -1,13 +1,13 @@
 //! Kernel: map domain [`Command`](janus_types::Command) to
 //! [`Response`](janus_types::Response) via a [`StorageEngine`].
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use janus_storage::{
     engine::{StorageEngine, Ttl},
-    snapshot,
+    snapshot::{self, SnapshotEntry},
     store::SnapshotStore,
     wal::{WalRecord, WalWriter, unix_now_secs},
 };
@@ -34,6 +34,10 @@ pub const ERR_CROSSSLOT: &str = "CROSSSLOT Keys in request don't hash to the sam
 /// The RESP edge rewrites this into `-MOVED <slot> <endpoint>` when a slot map
 /// is configured (see `janus_protocol::SlotEndpointMap`).
 pub const ERR_SLOT_NOT_OWNED: &str = "ERR slot not owned";
+/// Domain signal while a slot is MIGRATING and the key is absent locally.
+///
+/// The RESP edge rewrites this into `-ASK <slot> <endpoint>` (no host:port here).
+pub const ERR_SLOT_MIGRATING: &str = "ERR slot migrating";
 
 /// Owned domain command held in a MULTI queue (keys/values copied at enqueue).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,8 +79,9 @@ impl QueuedCommand {
             | Command::Exec
             | Command::Discard
             | Command::Auth { .. }
-            | Command::ClusterSlots => {
-                unreachable!("transaction control, AUTH, and CLUSTER SLOTS are not queued")
+            | Command::ClusterSlots
+            | Command::Asking => {
+                unreachable!("transaction control, AUTH, CLUSTER SLOTS, and ASKING are not queued")
             }
         }
     }
@@ -106,8 +111,9 @@ fn command_key<'a>(command: &Command<'a>) -> Option<&'a [u8]> {
         | Command::Discard
         | Command::Info
         | Command::Traces
-        | Command::Auth { .. }
-        | Command::ClusterSlots => None,
+        |         Command::Auth { .. }
+        | Command::ClusterSlots
+        | Command::Asking => None,
     }
 }
 
@@ -143,6 +149,7 @@ fn command_span_name(command: &Command<'_>) -> &'static str {
         Command::Traces => "TRACES",
         Command::Auth { .. } => "AUTH",
         Command::ClusterSlots => "CLUSTER",
+        Command::Asking => "ASKING",
     }
 }
 
@@ -171,7 +178,8 @@ pub fn is_write(command: &Command<'_>) -> bool {
         | Command::Exec
         | Command::Discard
         | Command::Auth { .. }
-        | Command::ClusterSlots => false,
+        | Command::ClusterSlots
+        | Command::Asking => false,
     }
 }
 
@@ -238,6 +246,11 @@ pub fn lock_kernel(mutex: &Mutex<Kernel>) -> MutexGuard<'_, Kernel> {
 /// Composition may restrict [`Kernel::owned_slots`] for multi-shard layouts.
 /// Keys outside the set fail with [`ERR_SLOT_NOT_OWNED`](ERR_SLOT_NOT_OWNED)
 /// (no host:port). Default ownership is every slot (single-node).
+///
+/// During control-plane resharding, a slot may be marked **MIGRATING** (still
+/// owned; absent keys signal [`ERR_SLOT_MIGRATING`](ERR_SLOT_MIGRATING)) or
+/// **IMPORTING** (not stably owned; one command is allowed when the RESP edge
+/// passes `asking`). Endpoints stay at the protocol / control-plane edge.
 pub struct Kernel {
     storage: Box<dyn StorageEngine>,
     requirepass: Option<Vec<u8>>,
@@ -249,6 +262,10 @@ pub struct Kernel {
     accepts_writes: bool,
     /// Slots this node owns (default: all 16384).
     owned_slots: SlotOwnership,
+    /// Slots leaving this node (still in [`owned_slots`] until finish).
+    migrating_slots: HashSet<u16>,
+    /// Slots arriving on this node (not yet in [`owned_slots`]).
+    importing_slots: HashSet<u16>,
     in_multi: bool,
     multi_queue: Vec<QueuedCommand>,
     total_commands: u64,
@@ -284,6 +301,8 @@ impl Kernel {
             replication: None,
             accepts_writes: true,
             owned_slots: SlotOwnership::all(),
+            migrating_slots: HashSet::new(),
+            importing_slots: HashSet::new(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -316,6 +335,8 @@ impl Kernel {
             replication: None,
             accepts_writes: true,
             owned_slots: SlotOwnership::all(),
+            migrating_slots: HashSet::new(),
+            importing_slots: HashSet::new(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -342,6 +363,8 @@ impl Kernel {
             replication: None,
             accepts_writes: true,
             owned_slots: SlotOwnership::all(),
+            migrating_slots: HashSet::new(),
+            importing_slots: HashSet::new(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -374,6 +397,8 @@ impl Kernel {
             replication: Some(sink),
             accepts_writes: true,
             owned_slots: SlotOwnership::all(),
+            migrating_slots: HashSet::new(),
+            importing_slots: HashSet::new(),
             in_multi: false,
             multi_queue: Vec::new(),
             total_commands: 0,
@@ -427,6 +452,75 @@ impl Kernel {
         self
     }
 
+    /// Mark `slot` as MIGRATING on the source (must already be owned).
+    pub fn begin_migrating(&mut self, slot: u16) {
+        if self.owned_slots.contains(slot) {
+            self.migrating_slots.insert(slot);
+            self.importing_slots.remove(&slot);
+        }
+    }
+
+    /// Mark `slot` as IMPORTING on the destination (not stably owned yet).
+    pub fn begin_importing(&mut self, slot: u16) {
+        if !self.owned_slots.contains(slot) {
+            self.importing_slots.insert(slot);
+            self.migrating_slots.remove(&slot);
+        }
+    }
+
+    /// Finish migration on the **source**: drop ownership and clear MIGRATING.
+    ///
+    /// Live keys hashing to `slot` are deleted locally after the filtered
+    /// export has been applied on the destination.
+    pub fn finish_migrate_source(&mut self, slot: u16) {
+        self.migrating_slots.remove(&slot);
+        for entry in self.export_slot(slot) {
+            let _ = self.storage.delete(&entry.key);
+        }
+        self.owned_slots.remove(slot);
+    }
+
+    /// Finish migration on the **destination**: take stable ownership and clear IMPORTING.
+    pub fn finish_migrate_destination(&mut self, slot: u16) {
+        self.importing_slots.remove(&slot);
+        self.owned_slots.insert(slot);
+    }
+
+    /// `true` when `slot` is in the MIGRATING set.
+    pub fn is_migrating(&self, slot: u16) -> bool {
+        self.migrating_slots.contains(&slot)
+    }
+
+    /// `true` when `slot` is in the IMPORTING set.
+    pub fn is_importing(&self, slot: u16) -> bool {
+        self.importing_slots.contains(&slot)
+    }
+
+    /// Export live entries whose keys hash to `slot` (filtered snapshot path).
+    pub fn export_slot(&mut self, target_slot: u16) -> Vec<SnapshotEntry> {
+        self.storage
+            .export_snapshot()
+            .into_iter()
+            .filter(|e| slot(&e.key) == target_slot)
+            .collect()
+    }
+
+    /// Merge-import slot entries (does not clear unrelated keys).
+    pub fn import_slot_entries(&mut self, entries: &[SnapshotEntry]) {
+        for entry in entries {
+            self.storage.set(&entry.key, &entry.value);
+            if let Some(secs) = entry.ttl_secs {
+                let deadline = self.storage.now() + Duration::from_secs(secs);
+                let _ = self.storage.expire_at(&entry.key, deadline);
+            }
+        }
+    }
+
+    /// Like [`execute`](Self::execute), but allow one keyed command against an IMPORTING slot.
+    pub fn execute_asking(&mut self, command: &Command<'_>) -> Response {
+        self.execute_inner(command, true)
+    }
+
     /// Drop the replication sink (demoted / standalone node no longer pushes).
     pub fn clear_replication(&mut self) {
         self.replication = None;
@@ -471,12 +565,22 @@ impl Kernel {
 
     /// Runs `command` and returns a domain response (no RESP bytes).
     pub fn execute(&mut self, command: &Command<'_>) -> Response {
+        self.execute_inner(command, false)
+    }
+
+    fn execute_inner(&mut self, command: &Command<'_>, asking: bool) -> Response {
         if !self.accepts_writes && is_write(command) {
             self.total_commands = self.total_commands.saturating_add(1);
             self.record_span(command_span_name(command));
             return Response::Error(ERR_READONLY_REPLICA.to_string());
         }
         match command {
+            Command::Asking => {
+                // Domain no-op; the RESP edge owns the one-shot connection flag.
+                self.total_commands = self.total_commands.saturating_add(1);
+                self.record_span("ASKING");
+                Response::Empty
+            }
             Command::Multi => {
                 self.total_commands = self.total_commands.saturating_add(1);
                 self.record_span("MULTI");
@@ -500,7 +604,7 @@ impl Kernel {
                 }
                 let mut results = Vec::with_capacity(queued.len());
                 for item in queued {
-                    results.push(self.apply_queued(item));
+                    results.push(self.apply_queued(item, false));
                 }
                 Response::Array(results)
             }
@@ -524,40 +628,52 @@ impl Kernel {
                 self.multi_queue.push(QueuedCommand::from_command(other));
                 Response::Queued
             }
-            other => self.execute_immediate(other),
+            other => self.execute_immediate(other, asking),
         }
     }
 
-    fn apply_queued(&mut self, queued: QueuedCommand) -> Response {
+    fn apply_queued(&mut self, queued: QueuedCommand, asking: bool) -> Response {
         match queued {
-            QueuedCommand::Set { key, value } => self.execute_immediate(&Command::Set {
-                key: key.as_slice(),
-                value: value.as_slice(),
-            }),
+            QueuedCommand::Set { key, value } => self.execute_immediate(
+                &Command::Set {
+                    key: key.as_slice(),
+                    value: value.as_slice(),
+                },
+                asking,
+            ),
             QueuedCommand::Get { key } => {
-                self.execute_immediate(&Command::Get { key: key.as_slice() })
+                self.execute_immediate(&Command::Get { key: key.as_slice() }, asking)
             }
             QueuedCommand::Delete { key } => {
-                self.execute_immediate(&Command::Delete { key: key.as_slice() })
+                self.execute_immediate(&Command::Delete { key: key.as_slice() }, asking)
             }
-            QueuedCommand::Expire { key, seconds } => self.execute_immediate(&Command::Expire {
-                key: key.as_slice(),
-                seconds,
-            }),
+            QueuedCommand::Expire { key, seconds } => self.execute_immediate(
+                &Command::Expire {
+                    key: key.as_slice(),
+                    seconds,
+                },
+                asking,
+            ),
             QueuedCommand::Ttl { key } => {
-                self.execute_immediate(&Command::Ttl { key: key.as_slice() })
+                self.execute_immediate(&Command::Ttl { key: key.as_slice() }, asking)
             }
-            QueuedCommand::Save => self.execute_immediate(&Command::Save),
-            QueuedCommand::Info => self.execute_immediate(&Command::Info),
-            QueuedCommand::Traces => self.execute_immediate(&Command::Traces),
+            QueuedCommand::Save => self.execute_immediate(&Command::Save, asking),
+            QueuedCommand::Info => self.execute_immediate(&Command::Info, asking),
+            QueuedCommand::Traces => self.execute_immediate(&Command::Traces, asking),
         }
     }
 
-    fn execute_immediate(&mut self, command: &Command<'_>) -> Response {
+    fn execute_immediate(&mut self, command: &Command<'_>, asking: bool) -> Response {
         self.total_commands = self.total_commands.saturating_add(1);
         self.record_span(command_span_name(command));
         if let Some(key) = command_key(command) {
-            if !self.owned_slots.contains(slot(key)) {
+            let key_slot = slot(key);
+            if self.owned_slots.contains(key_slot) {
+                if self.migrating_slots.contains(&key_slot) && self.storage.get(key).is_none() {
+                    // Absent key on a MIGRATING slot → edge rewrites to -ASK.
+                    return Response::Error(ERR_SLOT_MIGRATING.to_string());
+                }
+            } else if !(asking && self.importing_slots.contains(&key_slot)) {
                 return Response::Error(ERR_SLOT_NOT_OWNED.to_string());
             }
         }
@@ -643,6 +759,8 @@ impl Kernel {
             Command::ClusterSlots => {
                 Response::Error("ERR slot map not configured".to_string())
             }
+            // ASKING is handled in execute_inner / at the RESP edge.
+            Command::Asking => Response::Empty,
             Command::Multi | Command::Exec | Command::Discard => {
                 unreachable!("transaction control handled in execute")
             }
@@ -726,19 +844,23 @@ impl Kernel {
 /// `storage.now()` at apply time.
 pub fn apply_replication_record(kernel: &mut Kernel, record: &ReplicationRecord) -> Response {
     match record {
-        ReplicationRecord::Set { key, value } => kernel.execute_immediate(&Command::Set {
-            key: key.as_slice(),
-            value: value.as_slice(),
-        }),
+        ReplicationRecord::Set { key, value } => kernel.execute_immediate(
+            &Command::Set {
+                key: key.as_slice(),
+                value: value.as_slice(),
+            },
+            false,
+        ),
         ReplicationRecord::Delete { key } => {
-            kernel.execute_immediate(&Command::Delete { key: key.as_slice() })
+            kernel.execute_immediate(&Command::Delete { key: key.as_slice() }, false)
         }
-        ReplicationRecord::Expire { key, seconds } => {
-            kernel.execute_immediate(&Command::Expire {
+        ReplicationRecord::Expire { key, seconds } => kernel.execute_immediate(
+            &Command::Expire {
                 key: key.as_slice(),
                 seconds: *seconds,
-            })
-        }
+            },
+            false,
+        ),
     }
 }
 
@@ -1962,6 +2084,7 @@ mod tests {
             Command::Discard,
             Command::Auth { password: PASSWORD },
             Command::ClusterSlots,
+            Command::Asking,
         ];
         for command in &writes {
             assert!(is_write(command), "{command:?} should be a write");
@@ -2074,6 +2197,95 @@ mod tests {
         assert_eq!(
             kernel.execute(&Command::Get { key: b"{user}b" }),
             Response::Value(Some(b"2".to_vec()))
+        );
+    }
+
+    #[test]
+    fn migrating_absent_key_signals_domain_ask_without_host_port() {
+        let foo_slot = crate::slot::slot(b"foo");
+        let mut source = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        source.begin_migrating(foo_slot);
+        assert!(source.is_migrating(foo_slot));
+        let err = source.execute(&Command::Get { key: b"foo" });
+        assert_eq!(err, Response::Error(ERR_SLOT_MIGRATING.to_string()));
+        if let Response::Error(msg) = err {
+            assert!(!msg.contains(':'));
+            assert!(!msg.contains("ASK "));
+            assert!(!msg.contains("MOVED"));
+        }
+        assert_eq!(
+            source.execute(&Command::Set {
+                key: b"foo",
+                value: b"here",
+            }),
+            Response::Error(ERR_SLOT_MIGRATING.to_string())
+        );
+    }
+
+    #[test]
+    fn migrating_present_key_serves_locally() {
+        let foo_slot = crate::slot::slot(b"foo");
+        let mut source = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        assert_eq!(
+            source.execute(&Command::Set {
+                key: b"foo",
+                value: b"v",
+            }),
+            Response::Empty
+        );
+        source.begin_migrating(foo_slot);
+        assert_eq!(
+            source.execute(&Command::Get { key: b"foo" }),
+            Response::Value(Some(b"v".to_vec()))
+        );
+    }
+
+    #[test]
+    fn importing_requires_asking_then_slot_transfer_completes() {
+        let foo_slot = crate::slot::slot(b"foo");
+        let mut source = Kernel::new(MemoryStorageEngine::new())
+            .with_owned_slots(SlotOwnership::from_slots([foo_slot]));
+        let mut dest =
+            Kernel::new(MemoryStorageEngine::new()).with_owned_slots(SlotOwnership::from_slots([]));
+
+        assert_eq!(
+            source.execute(&Command::Set {
+                key: b"foo",
+                value: b"migrated",
+            }),
+            Response::Empty
+        );
+        source.begin_migrating(foo_slot);
+        dest.begin_importing(foo_slot);
+
+        assert_eq!(
+            dest.execute(&Command::Get { key: b"foo" }),
+            Response::Error(ERR_SLOT_NOT_OWNED.to_string())
+        );
+
+        let entries = source.export_slot(foo_slot);
+        assert_eq!(entries.len(), 1);
+        dest.import_slot_entries(&entries);
+        assert_eq!(
+            dest.execute_asking(&Command::Get { key: b"foo" }),
+            Response::Value(Some(b"migrated".to_vec()))
+        );
+
+        source.finish_migrate_source(foo_slot);
+        dest.finish_migrate_destination(foo_slot);
+        assert!(!source.is_migrating(foo_slot));
+        assert!(!dest.is_importing(foo_slot));
+        assert!(!source.owned_slots().contains(foo_slot));
+        assert!(dest.owned_slots().contains(foo_slot));
+        assert_eq!(
+            dest.execute(&Command::Get { key: b"foo" }),
+            Response::Value(Some(b"migrated".to_vec()))
+        );
+        assert_eq!(
+            source.execute(&Command::Get { key: b"foo" }),
+            Response::Error(ERR_SLOT_NOT_OWNED.to_string())
         );
     }
 }

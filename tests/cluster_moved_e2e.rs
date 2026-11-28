@@ -89,10 +89,10 @@ async fn remote_key_returns_moved_with_slot_and_endpoint() {
         Kernel::new(MemoryStorageEngine::new())
             .with_owned_slots(SlotOwnership::from_slots([bar_slot])),
     ));
-    let map = Arc::new(SlotEndpointMap::from_ranges([
+    let map = Arc::new(Mutex::new(SlotEndpointMap::from_ranges([
         (0u16, 8191, "127.0.0.1:7000"),
         (8192, 16383, "127.0.0.1:7001"),
-    ]));
+    ])));
     let map_factory = Arc::clone(&map);
 
     tokio::spawn(async move {
@@ -129,6 +129,7 @@ async fn remote_key_returns_moved_with_slot_and_endpoint() {
     assert!(body.contains("127.0.0.1"));
     assert!(body.contains("7000"));
     assert!(body.contains("7001"));
+    let map = map.lock().expect("map");
     assert_eq!(map.endpoint_for_slot(foo_slot), Some("127.0.0.1:7001"));
     assert_eq!(map.endpoint_for_slot(bar_slot), Some("127.0.0.1:7000"));
 }

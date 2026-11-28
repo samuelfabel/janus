@@ -257,8 +257,11 @@ host:port. MULTI/EXEC rejects cross-slot key sets.
 **Client redirects (subset):** composition may inject a `SlotEndpointMap` on the
 RESP protocol instance. Ownership misses become `-MOVED <slot> <host:port>`;
 `CLUSTER SLOTS` advertises the map. Cross-slot failures encode as stable RESP
-errors. `-ASK` / resharding and gossip remain out of scope — see
-[cluster-client.md](cluster-client.md).
+errors. Control-plane resharding marks Kernel slots MIGRATING / IMPORTING
+(domain only); the RESP edge emits `-ASK` / honors `ASKING` via an
+`AskEndpointMap`. Key transfer uses a filtered snapshot export — see
+[cluster-client.md](cluster-client.md). Gossip and transparent proxying remain
+out of scope.
 
 # Future Architecture
 
@@ -266,7 +269,6 @@ Future versions may introduce additional layers.
 
 Examples:
 
-- `-ASK` redirects and slot migration / resharding
 - Plugin system
 - Security
 
